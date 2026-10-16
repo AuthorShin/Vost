@@ -1,0 +1,51 @@
+{
+  "name": "vost",
+  "version": "0.1.0",
+  "description": "Vost — a self-hosted, open-source TradingView alternative: charting, data from free public APIs or CSV files, and unlimited backtesting.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "engines": {
+    "node": ">=20.19"
+  },
+  "keywords": [
+    "tradingview",
+    "charting",
+    "backtesting",
+    "trading",
+    "stocks",
+    "crypto",
+    "ohlcv",
+    "self-hosted",
+    "open-source",
+    "lightweight-charts"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c cyan,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node --watch server/index.mjs",
+    "dev:client": "vite --config client/vite.config.ts",
+    "build": "npm run typecheck && vite build --config client/vite.config.ts",
+    "start": "node server/index.mjs",
+    "typecheck": "tsc -p client/tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "lightweight-charts": "^5.0.0",
+    "papaparse": "^5.5.2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/papaparse": "^5.3.15",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.8"
+  }
+}

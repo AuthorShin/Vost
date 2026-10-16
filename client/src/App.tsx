@@ -1,0 +1,33 @@
+import { useEffect, useState } from 'react';
+import { BottomDock } from './components/BottomDock';
+import { ChartPanel } from './components/ChartPanel';
+import { CsvImportModal } from './components/CsvImportModal';
+import { Sidebar } from './components/Sidebar';
+import { Toasts } from './components/Toasts';
+import { TopBar } from './components/TopBar';
+import { useStore } from './state/store';
+
+export default function App() {
+  const init = useStore((s) => s.init);
+  const [csvOpen, setCsvOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  useEffect(() => {
+    init();
+  }, [init]);
+
+  return (
+    <div className="app">
+      <TopBar onImportCsv={() => setCsvOpen(true)} onToggleSidebar={() => setSidebarOpen((v) => !v)} />
+      <div className="app-body">
+        {sidebarOpen && <Sidebar onImportCsv={() => setCsvOpen(true)} />}
+        <main className="chart-area">
+          <ChartPanel onImportCsv={() => setCsvOpen(true)} />
+        </main>
+      </div>
+      <BottomDock />
+      {csvOpen && <CsvImportModal onClose={() => setCsvOpen(false)} />}
+      <Toasts />
+    </div>
+  );
+}

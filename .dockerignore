@@ -1,0 +1,16 @@
+node_modules
+client/dist
+.git
+.github
+.env
+.env.*
+*.log
+coverage
+docs
+examples
+README.md
+CONTRIBUTING.md
+LICENSE
+.dockerignore
+docker-compose.yml
+.gitignore
