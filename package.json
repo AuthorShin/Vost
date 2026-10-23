@@ -38,6 +38,7 @@
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@callum/dev-system": "github:cbundy/dev-system#semver:0.x",
     "@types/node": "^22.15.0",
     "@types/papaparse": "^5.3.15",
     "@types/react": "^19.1.0",

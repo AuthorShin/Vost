@@ -1,0 +1,6 @@
+{
+  "gateCommands": [
+    "npm ci && npm run typecheck",
+    "npm ci && npm test"
+  ]
+}
