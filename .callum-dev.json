@@ -1,0 +1,14 @@
+{
+  "version": "0.89.0",
+  "baseline": ".callum-dev/baseline",
+  "devcontainer": "base-image",
+  "files": [
+    "treehouse.toml",
+    ".claude/factory-loop.json",
+    ".github/workflows/ci.yml",
+    "CLAUDE.md",
+    ".claude/settings.json",
+    ".devcontainer/devcontainer.json",
+    ".gitignore"
+  ]
+}

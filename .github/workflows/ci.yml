@@ -1,17 +1,20 @@
-name: CI
+# CI for this repo. Repo-owned: dev-system scaffolds it once (`callum-dev init`) and never syncs it.
+# The lint and test commands below must match `gateCommands` in .claude/factory-loop.json and the
+# "Canonical commands" section of CLAUDE.md: the factory loop's gate and CI run the same commands.
+name: ci
 
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: typecheck / test / build (Node ${{ matrix.node }})
+  ci:
+    name: ci (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -25,13 +28,13 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
 
-      - name: Install dependencies
+      - name: Toolchain and install
         run: npm ci
 
-      - name: Typecheck
+      - name: Lint (typecheck)
         run: npm run typecheck
 
-      - name: Unit & integration tests
+      - name: Test
         run: npm test
 
       - name: Build client
