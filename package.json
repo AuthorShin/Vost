@@ -28,22 +28,33 @@
     "start": "node server/index.mjs",
     "typecheck": "tsc -p client/tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "e2e:capture": "node e2e/capture/run.ts"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20.4",
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/language": "^6.13.1",
+    "@codemirror/lint": "^6.9.7",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "@lezer/highlight": "^1.2.5",
     "lightweight-charts": "^5.0.0",
     "papaparse": "^5.5.2",
+    "pinets": "0.13.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "zustand": "^5.0.3"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0",
+    "@callum/dev-system": "github:cbundy/dev-system#semver:0.x",
+    "@types/node": "^24",
     "@types/papaparse": "^5.3.15",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
+    "playwright": "1.64.1",
     "typescript": "^5.8.2",
     "vite": "^6.2.0",
     "vitest": "^3.0.8"

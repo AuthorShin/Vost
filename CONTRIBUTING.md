@@ -20,6 +20,7 @@ Useful scripts:
 | `npm run typecheck` | Strict typecheck of the whole client |
 | `npm run build` | Typecheck + production bundle into `client/dist` |
 | `npm start` | Serve the production build on :8787 |
+| `npm run -s e2e:capture -- <scenario>` | Screenshots/video into `docs/evidence` (see `docs/e2e-visual-verification.md`) |
 
 ## Project layout
 
@@ -60,6 +61,10 @@ export const myProvider: DataProvider = {
   },
 };
 ```
+
+   For realtime candles also set `supportsLive: true` and implement `startLive(opts)`, which opens a websocket
+   and returns a `{ stop() }` handle (see `lib/liveSocket.ts` for a reconnecting helper). Leave both out if the
+   upstream has no candle stream; `supportsLive` must be true exactly when `startLive` exists.
 
 2. Register it in `client/src/lib/providers/index.ts` (add to the `providers` array).
 3. If the upstream needs a new host, add that hostname to `ALLOWED_HOSTS` in `server/index.mjs`.
@@ -105,7 +110,7 @@ Then append it to the `strategies` array. Rules:
 1. Fork, branch (`feat/drawing-tools`, `fix/csv-day-first`).
 2. Conventional commit messages (`feat:`, `fix:`, `docs:`, `refactor:` …) are appreciated.
 3. Make sure `npm run typecheck && npm test && npm run build` pass.
-4. Open a PR describing the change, with a screenshot for UI work.
+4. Open a PR describing the change, with a screenshot for UI work (see `docs/e2e-visual-verification.md`).
 
 ## Reporting bugs
 
