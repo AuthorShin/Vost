@@ -162,6 +162,29 @@ describe('pine indicators', () => {
   });
 });
 
+describe('openWatchItem', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    stubStorage();
+  });
+
+  it('sets provider and symbol together and loads once', async () => {
+    const { useStore } = await import('./store');
+    track(useStore);
+    const seen: Array<{ providerId: string; symbol: string }> = [];
+    const loadData = vi.fn().mockImplementation(async () => {
+      const { providerId, symbol } = useStore.getState();
+      seen.push({ providerId, symbol });
+    });
+    useStore.setState({ loadData });
+    useStore.getState().openWatchItem('kraken', 'XBTUSD');
+    expect(seen).toEqual([{ providerId: 'kraken', symbol: 'XBTUSD' }]);
+    expect(useStore.getState().providerId).toBe('kraken');
+    expect(useStore.getState().symbol).toBe('XBTUSD');
+    expect(loadData).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('stale persist isolation', () => {
   it('a pending save from a previous store cannot write into the next test', async () => {
     vi.resetModules();
