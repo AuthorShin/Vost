@@ -7,6 +7,7 @@ import { catalogEntry } from '../../shared/providerCatalog.ts';
 import type { StatusFeed } from '../../shared/status.ts';
 import { liveFeed } from '../live/feeds.ts';
 import { realTimers, type Timers, type WebSocketCtor, type WsLike } from '../live/socket.ts';
+import { upstreamUrl } from '../testUpstream.ts';
 import { adapters } from '../providers/index.ts';
 import type { SymbolCache } from '../providers/symbolCache.ts';
 import type { FetchFn } from '../providers/upstream.ts';
@@ -112,7 +113,7 @@ export function probeLive(provider: string, env: ProbeEnv = {}): Promise<CheckRe
       );
     }, timeoutMs);
     try {
-      sock = new Ctor(feed.url);
+      sock = new Ctor(upstreamUrl(feed.url));
     } catch (err) {
       return finish({ ok: false, error: `could not open the socket: ${err instanceof Error ? err.message : String(err)}` });
     }
