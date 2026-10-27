@@ -5,6 +5,7 @@
  * never open a socket or wait.
  */
 import { formatClose, type Candle, type LiveLogEvent, type LiveStatusEvent } from '../../shared/market.ts';
+import { upstreamUrl } from '../testUpstream.ts';
 import type { LiveFeed } from './feeds.ts';
 
 /** Failed attempts in a row before the feed reports `error` and falls back to the slow retry. */
@@ -116,7 +117,7 @@ export function openUpstream(opts: SocketOptions): UpstreamSocket {
     currentUrl = usingFallback && feed.fallbackUrl ? feed.fallbackUrl : feed.url;
     let sock: WsLike;
     try {
-      sock = new Ctor(currentUrl);
+      sock = new Ctor(upstreamUrl(currentUrl));
     } catch (err) {
       fail(`could not open the socket: ${err instanceof Error ? err.message : String(err)}`);
       return;

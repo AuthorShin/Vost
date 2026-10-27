@@ -7,6 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import type { Browser } from 'playwright';
+import { startFakeUpstream } from '../fake-upstream/index.ts';
+import type { FakeUpstream } from '../fake-upstream/index.ts';
 import { formatLaunchError } from './launch-error.ts';
 import { StepError, runScenario } from './scenario.ts';
 import { scenarios } from './scenarios/index.ts';
@@ -108,6 +110,7 @@ async function main(): Promise<string[]> {
   const { names, slug } = parseArgs(process.argv.slice(2));
 
   let server: ChildProcess | null = null;
+  let upstream: FakeUpstream | null = null;
   let browser: Browser | null = null;
   const stop = () => {
     void stopServer(server).finally(() => process.exit(130));
@@ -122,9 +125,19 @@ async function main(): Promise<string[]> {
     }
     const port = await freePort();
     const baseUrl = `http://127.0.0.1:${port}`;
+    // The fake market-data service comes first: no capture may reach the real network from the server either.
+    upstream = await startFakeUpstream();
     server = spawn(process.execPath, ['server/index.mjs'], {
       cwd: ROOT,
-      env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', VOST_STATUS_INTERVAL: '0' },
+      env: {
+        ...process.env,
+        // The server refuses VOST_TEST_UPSTREAM in production, so a shell with NODE_ENV=production must not break the run.
+        NODE_ENV: 'test',
+        PORT: String(port),
+        HOST: '127.0.0.1',
+        VOST_STATUS_INTERVAL: '0',
+        VOST_TEST_UPSTREAM: upstream.url,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const serverOut = capture(server);
@@ -144,7 +157,7 @@ async function main(): Promise<string[]> {
       const scenario = scenarios.get(name)!;
       const outDir = path.join(ROOT, 'docs', 'evidence', slug ?? name);
       for (const viewport of scenario.viewports ?? ['desktop']) {
-        const files = await runScenario({ browser, baseUrl, outDir, scenario, viewport });
+        const files = await runScenario({ browser, baseUrl, outDir, scenario, viewport, upstream });
         for (const f of files) {
           written.push(f);
           if (f.endsWith('.webm') && hasFfmpeg()) written.push(await toGif(f));
@@ -156,6 +169,7 @@ async function main(): Promise<string[]> {
   } finally {
     await browser?.close().catch(() => undefined);
     await stopServer(server);
+    await upstream?.close();
   }
 }
 
