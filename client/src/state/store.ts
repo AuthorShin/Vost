@@ -42,9 +42,9 @@ function toastSource(text: string): string {
   return 'Data';
 }
 
-/** Latest Pine run of one indicator entry. `result` is kept while a newer run is in flight. */
 export type DockTab = 'backtest' | 'pine' | 'optimizer' | 'results';
 
+/** Latest Pine run of one indicator entry. `result` is kept while a newer run is in flight. */
 export interface PineRunState {
   running: boolean;
   result?: PineResult;
