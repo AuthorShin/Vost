@@ -1,0 +1,81 @@
+/**
+ * Helpers shared by the keyless exchange adapters (Coinbase, Kraken, Bybit,
+ * OKX): backwards pagination, symbol search and sorting.
+ */
+import { MAX_BARS, type Candle, type SymbolSuggestion } from '../../shared/market.ts';
+import { cropToSpan } from './range.ts';
+
+/** One candle per time (the last one wins), ascending. Drops rows without a finite time and close. */
+export function sortCandles(candles: Candle[]): Candle[] {
+  const map = new Map<number, Candle>();
+  for (const c of candles) {
+    if (Number.isFinite(c.time) && Number.isFinite(c.close)) map.set(c.time, c);
+  }
+  return Array.from(map.values()).sort((a, b) => a.time - b.time);
+}
+
+/** What `paginateBackwards` collects: `bars` candles, or (when `from` is set) every candle in `from`..`to`. */
+export interface PageTarget {
+  bars?: number;
+  /** Range mode: keep paging until the oldest candle is at or before this time. */
+  from?: number;
+  /** Newest time wanted; the adapter starts its first page there. Candles after it are dropped. */
+  to?: number;
+}
+
+/**
+ * Collect candles ending at `to` (default "now"), paging backwards. `fetchPage`
+ * receives the oldest candle time so far (unix seconds, undefined on the first
+ * call) and returns one page of candles in any order. Stops when a page is
+ * empty or reaches no further back (start of history); bars mode also stops at
+ * `bars` candles and keeps the newest `bars`, range mode stops once the oldest
+ * candle is at or before `from` (or past MAX_BARS candles) and keeps only the
+ * candles inside the span.
+ */
+export async function paginateBackwards(
+  target: number | PageTarget,
+  fetchPage: (beforeSec: number | undefined) => Promise<Candle[]>,
+  signal?: AbortSignal,
+): Promise<Candle[]> {
+  const { bars, from, to } = typeof target === 'number' ? ({ bars: target } as PageTarget) : target;
+  const range = from !== undefined;
+  const out: Candle[] = [];
+  let before: number | undefined;
+  while (range ? out.length <= MAX_BARS : out.length < (bars ?? 0)) {
+    const page = (await fetchPage(before)).filter((c) => Number.isFinite(c.time) && Number.isFinite(c.close));
+    if (page.length === 0) break;
+    const oldest = Math.min(...page.map((c) => c.time));
+    if (before !== undefined && oldest >= before) break;
+    out.push(...page);
+    before = oldest;
+    if (range && oldest <= from) break;
+    signal?.throwIfAborted();
+  }
+  const sorted = sortCandles(out);
+  if (range) return cropToSpan(sorted, from, to);
+  return (to === undefined ? sorted : cropToSpan(sorted, undefined, to)).slice(-(bars ?? 0));
+}
+
+/** Prefix matches first, then substring matches; at most 12. */
+export function filterSymbols(all: SymbolSuggestion[], query: string): SymbolSuggestion[] {
+  const q = query.trim().toUpperCase();
+  const direct: SymbolSuggestion[] = [];
+  const rest: SymbolSuggestion[] = [];
+  for (const s of all) {
+    if (s.symbol.startsWith(q)) direct.push(s);
+    else if (s.symbol.includes(q) || (s.label ?? '').toUpperCase().includes(q)) rest.push(s);
+    if (direct.length >= 12) break;
+  }
+  return [...direct, ...rest].slice(0, 12);
+}
+
+const QUOTE_PRIORITY = ['USDT', 'USD', 'USDC', 'EUR', 'BTC', 'ETH'];
+
+/** Sort so common quote currencies come first, then alphabetically. */
+export function sortSuggestions(list: SymbolSuggestion[]): SymbolSuggestion[] {
+  const rank = (s: SymbolSuggestion): number => {
+    const i = QUOTE_PRIORITY.indexOf((s.label ?? '').split(' / ')[1]);
+    return i === -1 ? 99 : i;
+  };
+  return list.slice().sort((a, b) => rank(a) - rank(b) || a.symbol.localeCompare(b.symbol));
+}

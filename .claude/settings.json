@@ -7,12 +7,12 @@
       "source": {
         "source": "github",
         "repo": "cbundy/dev-system",
-        "ref": "v0.90.0"
+        "ref": "v0.101.0"
       }
     }
   },
   "enabledPlugins": {
-    "callum-flow@callum": true
+    "fabriek@callum": true
   },
   "permissions": {
     "allow": [
@@ -27,6 +27,23 @@
       "Bash(gh pr checks *)",
       "Bash(gh pr list *)",
       "Bash(/usr/local/share/callum-tools/check-pr-linkage.sh *)",
+      "Bash(fabriek-event *)",
+      "Bash(fabriek-merge-guard *)",
+      "Bash(fabriek-rollout *)",
+      "Bash(fabriek-claim)",
+      "Bash(fabriek-claim *)",
+      "Bash(fabriek-milestone)",
+      "Bash(fabriek-milestone *)",
+      "Bash(fabriek-implementer-route *)",
+      "Bash(fabriek-designer-route *)",
+      "Bash(fabriek-sweep)",
+      "Bash(fabriek-sweep *)",
+      "Bash(fabriek-evaluate *)",
+      "Bash(fabriek-evidence-upload *)",
+      "Bash(fabriek-capture *)",
+      "Bash(fabriek-factory-state)",
+      "Bash(fabriek-factory-state *)",
+      "Bash(fabriek-issue-read *)",
       "Bash(callum-flow-event *)",
       "Bash(callum-flow-merge-guard *)",
       "Bash(callum-flow-rollout *)",
@@ -34,14 +51,13 @@
       "Bash(callum-flow-claim *)",
       "Bash(callum-flow-milestone)",
       "Bash(callum-flow-milestone *)",
-      "Bash(callum-flow-design-route *)",
       "Bash(callum-flow-implementer-route *)",
       "Bash(callum-flow-designer-route *)",
-      "Bash(callum-flow-regate *)",
       "Bash(callum-flow-sweep)",
       "Bash(callum-flow-sweep *)",
       "Bash(callum-flow-evaluate *)",
       "Bash(callum-flow-evidence-upload *)",
+      "Bash(callum-flow-capture *)",
       "Bash(callum-flow-factory-state)",
       "Bash(callum-flow-factory-state *)",
       "Bash(callum-flow-issue-read *)"

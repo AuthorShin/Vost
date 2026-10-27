@@ -7,8 +7,9 @@
 Pull free public market data, import your own CSV files, chart them with [lightweight-charts](https://github.com/tradingview/lightweight-charts), and run **unlimited** backtests with a parameter optimizer — all from a single Node process with **zero runtime dependencies**.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
-[![CI](https://github.com/AuthorShin/Vost/actions/workflows/ci.yml/badge.svg)](https://github.com/AuthorShin/Vost/actions/workflows/ci.yml)
-[![Node](https://img.shields.io/badge/node-%3E%3D20.19-brightgreen.svg)](#quick-start)
+[![Release](https://img.shields.io/github/v/release/cbundy/Vost)](https://github.com/cbundy/Vost/releases)
+[![CI](https://github.com/cbundy/Vost/actions/workflows/ci.yml/badge.svg)](https://github.com/cbundy/Vost/actions/workflows/ci.yml)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg)](#quick-start)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 </div>
@@ -22,7 +23,7 @@ Pull free public market data, import your own CSV files, chart them with [lightw
 | 🔑 **No accounts, no keys, no quotas** | Data comes from free public APIs (Binance, Yahoo Finance, Stooq) or your own files. Nothing is metered, nothing phones home. |
 | 📴 **Works completely offline** | Import an OHLCV CSV → chart it → backtest it. Parsing, storing and computing all happen **in your browser**. Airplane-mode friendly. |
 | ♾️ **Unlimited backtests** | No "upgrade to run more". The engine runs client-side in a Web Worker; even 100k-bar datasets and thousands-of-combinations grid searches are just local CPU. |
-| 🏠 **Self-hosted in one command** | `docker compose up` or `npm start`. A single Node process serves the app and a *whitelisted* data proxy. |
+| 🏠 **Self-hosted in one command** | `docker compose up` or `npm start`. A single Node process serves the app and its market-data API. |
 | 🧪 **A backtester that respects reality** | Next-bar-open fills, fees & slippage in bps, stop loss / take profit, long & short, position sizing, equity curve, drawdown, Sharpe/Sortino/Calmar… |
 | 🧩 **Hackable** | ~40 lines to plug in your own market-data API. Custom signal logic in plain JavaScript. Everything is TypeScript, everything is tested. |
 
@@ -32,7 +33,8 @@ Pull free public market data, import your own CSV files, chart them with [lightw
 - Candlestick chart with volume, powered by TradingView's open-source *lightweight-charts* (v5, panes supported)
 - Indicators: SMA, EMA, Bollinger Bands, VWAP, Volume, RSI, MACD — configurable periods & colors, live editing
 - Crosshair legend with OHLC + change + volume, fit-to-screen, PNG screenshot, CSV export
-- Live streaming candles from Binance websockets (auto-reconnect, data-stream fallback host)
+- Live streaming candles (the server keeps one exchange websocket per feed, shared by all tabs, with auto-reconnect and a Binance fallback host)
+- Connection health light in the top bar: whether each exchange's price history, symbol lookup and live stream is working right now, with a "Test now" button (the server checks about once a minute; `VOST_STATUS_INTERVAL=0` turns that off)
 
 **Data**
 - **Binance** — free public crypto klines + realtime websocket, no key
@@ -46,6 +48,7 @@ Pull free public market data, import your own CSV files, chart them with [lightw
 - Built-in strategies: SMA/EMA crossover, MACD, RSI mean-reversion, Bollinger (breakout & reversion), Donchian breakout, Buy & hold — plus **custom JavaScript strategies**
 - Engine: single position, next-bar-open fills, bps fees & slippage per side, intrabar stops/takes (stop-first conservative assumption, gap-through fills), shorts optional
 - Results: 20+ metrics (CAGR, Sharpe, Sortino, Calmar, max drawdown & duration, profit factor, exposure, expectancy…), equity + underwater chart, full trade log, CSV exports, trade markers drawn on the chart
+- Time range: the backtester and the optimizer run on the From / To range set in the Backtest pane (default: all loaded data)
 - **Optimizer**: grid-search one or two parameters, ranked by any metric, with a clickable heatmap — apply the best combo and re-run in one click
 
 ## Quick start
@@ -53,18 +56,20 @@ Pull free public market data, import your own CSV files, chart them with [lightw
 ### Docker (recommended for self-hosting)
 
 ```bash
-git clone https://github.com/AuthorShin/Vost.git
+git clone https://github.com/cbundy/Vost.git
 cd Vost
+git checkout vX.Y.Z   # a release tag from the Releases page (or: git clone --branch vX.Y.Z ...)
 docker compose up -d
 ```
 
-Open <http://localhost:8787>. Done.
+Open <http://localhost:8787>. Done. The running version is shown in the top bar (next to the logo), in `GET /api/health` and in the server startup log.
 
-### Local (Node 24 recommended, 20.19+ supported)
+### Local (Node 24 recommended, 22.18+ supported)
 
 ```bash
-git clone https://github.com/AuthorShin/Vost.git
+git clone https://github.com/cbundy/Vost.git
 cd Vost
+git checkout vX.Y.Z   # a release tag from the Releases page (or: git clone --branch vX.Y.Z ...)
 npm install
 npm run build     # typecheck + bundle the web client
 npm start         # serves http://localhost:8787
@@ -95,9 +100,9 @@ npm run -s e2e:capture -- chart  # screenshots/video into docs/evidence (see doc
 
 For a full comparison of these and candidate providers (limits, CORS, keys, terms), see [docs/DATA-SOURCES.md](docs/DATA-SOURCES.md).
 
-All remote requests go through the app's own tiny proxy (`/api/proxy?url=…`) which only forwards to a **whitelist** of hosts (`server/index.mjs → ALLOWED_HOSTS`). Your browser never talks to third parties directly unless you deploy static-only with `VITE_DIRECT=true`.
+The Vost server fetches all remote market data for the browser (`/api/history`, `/api/search`, `/api/symbols`, `/api/providers`) and only talks to a fixed set of providers. About once a minute it also makes a small test request to each provider's history, symbol-search and live feeds (about 17 checks, spread out, with the full symbol lists only every 10th round) to power the connection health light at `/api/status`; set `VOST_STATUS_INTERVAL=0` to switch that off. Your browser never calls those third parties for history or symbol search. Live candles also come from the server: it keeps one websocket per exchange feed, shared by every open tab, and streams the updates to the browser over a same-origin `/api/live` event stream, so the browser talks to no exchange at all. A static-only deployment (no Node server) supports only CSV import and Demo.
 
-> **Bring your own API:** implement the `DataProvider` interface in `client/src/lib/providers/` and register it — the UI picks it up automatically in the provider dropdown. See [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-data-provider).
+> **Bring your own API:** add a server adapter in `server/providers/` and a catalog entry in `shared/providerCatalog.ts` — the UI picks it up automatically in the provider dropdown. See [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-data-provider).
 
 ## CSV import — the offline workflow
 
@@ -138,7 +143,7 @@ Signals are computed per bar from data **up to and including that bar**, then ex
 
 Risk controls: initial capital, position size (% of equity), fees (bps), slippage (bps), stop loss %, take profit %, long/short toggle.
 
-The **Optimizer** runs full backtests over a 1D or 2D parameter grid inside the same Web Worker (progress bar included), ranks results by any metric, and renders a heatmap. Click a cell → parameters applied → backtest re-run.
+The **Optimizer** runs full backtests over a 1D or 2D parameter grid inside the same Web Worker (progress bar included), ranks results by any metric, and renders a heatmap. Click a cell → parameters applied → backtest re-run. The backtester and the optimizer both run on the time range set in the Backtest pane (empty = all loaded data).
 
 Custom strategies are plain JavaScript with indicator helpers, executed in the worker:
 
@@ -166,19 +171,24 @@ Vost/
 │   └── src/
 │       ├── components/        # UI: chart panel, top bar, dock, CSV modal…
 │       ├── lib/
-│       │   ├── providers/     # data providers (binance, yahoo, stooq, demo)
+│       │   ├── providers/     # provider registry, /api client, live stream client, demo
 │       │   ├── backtest/      # engine, metrics, strategies, optimizer
 │       │   ├── csv.ts         # dialect-tolerant CSV import engine
 │       │   ├── indicators.ts  # SMA/EMA/RSI/MACD/BB/ATR/VWAP…
 │       │   └── workers/       # backtest Web Worker
 │       └── state/             # zustand store (prefs, datasets, runs)
 ├── server/
-│   └── index.mjs              # zero-dep Node server: static + whitelisted proxy
+│   ├── index.mjs              # entry point: checks the Node version, then loads main.ts
+│   ├── main.ts                # zero-dep Node server: static files + the /api routes
+│   ├── api.ts                 # /api/providers, /history, /symbols, /search
+│   ├── live/                  # /api/live: shared exchange websockets streamed to the browser
+│   └── providers/             # one REST adapter per data provider (Binance, Yahoo, …)
+├── shared/                    # wire types and the provider catalog, used by server and client
 ├── examples/                  # ready-to-import sample CSVs
 └── docs/                      # strategy authoring & deployment guides
 ```
 
-- The **server** does two things: serve `client/dist` and forward `/api/proxy?url=` requests to allow-listed market-data hosts (needed because Yahoo/Stooq send no CORS headers). No database, no state.
+- The **server** does two things: serve `client/dist` and answer the market-data API by calling the public provider APIs for the browser (many of them send no CORS headers), including the live candle stream. Its only state is in memory: the symbol-list cache and the open exchange websockets. It is TypeScript that Node runs directly (type stripping), with no build step and no npm dependency. No database.
 - The **client** holds everything else: fetching, CSV parsing, indicator math, backtests (in a Web Worker), persistence (localStorage). This is what makes offline mode work.
 
 ### Configuration
@@ -187,8 +197,6 @@ Vost/
 |---|---|---|---|
 | `PORT` | server | `8787` | HTTP port |
 | `HOST` | server | `0.0.0.0` | Bind address (use `127.0.0.1` behind a reverse proxy) |
-| `VITE_DIRECT` | build-time | unset | `true` → skip the proxy and fetch upstreams directly (static-only hosting; CORS applies) |
-| `VITE_PROXY_PREFIX` | build-time | `/api/proxy` | Override the proxy path prefix |
 | `VOST_SERVER_URL` | dev | `http://localhost:8787` | Target for the Vite dev proxy |
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for Docker, systemd, nginx/TLS examples and static-hosting notes.

@@ -10,11 +10,17 @@ RUN npm ci
 
 # Build the web client (typecheck + vite build -> client/dist).
 COPY client ./client
+COPY shared ./shared
+COPY server ./server
 RUN npm run build
 
 # ---------- runtime stage: zero-dependency server + built assets ----------
 FROM node:24-alpine AS runtime
 WORKDIR /app
+
+LABEL org.opencontainers.image.source="https://github.com/cbundy/Vost" \
+      org.opencontainers.image.title="Vost" \
+      org.opencontainers.image.licenses="MIT"
 
 ENV NODE_ENV=production \
     PORT=8787 \
@@ -22,6 +28,7 @@ ENV NODE_ENV=production \
 
 COPY package.json ./package.json
 COPY server ./server
+COPY shared ./shared
 COPY --from=build /app/client/dist ./client/dist
 
 # The server uses only Node built-ins — drop privileges.

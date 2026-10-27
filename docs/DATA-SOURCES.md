@@ -6,8 +6,12 @@ How to read it:
 
 - Keyless endpoints were each called once on 2026-10-23 from the dev container. The result is in the "Checked" line of each section.
 - Limits are quoted from each provider's own docs (linked per section). Where a limit is from memory of the docs and the page was not read for this survey, it is marked "verify". Free-tier limits change often; check the linked page before building.
-- "Proxy hosts" are the hosts that would be added to `ALLOWED_HOSTS` in `server/index.mjs`. A host with browser CORS enabled can be called directly with `VITE_DIRECT=true`; otherwise it needs the proxy.
-- "Today" means a provider is registered in `client/src/lib/providers/`.
+- "Server hosts" are the hosts a server adapter in `server/providers/` calls. Since the server makes every REST call, browser CORS no longer decides whether a provider works; the "Browser CORS (checked)" column is kept as a survey fact.
+- "Today" means a provider is in `shared/providerCatalog.ts` with an adapter in `server/providers/`.
+
+## Time ranges
+
+`GET /api/history` takes an optional `from` (unix seconds). With it, `bars` is optional and ignored, and every remote provider returns exactly the candles with `from <= time <= to`, ascending, no duplicates; `to` defaults to now and a later `to` is clamped to now. With `to` and `bars` but no `from`, the result is `bars` candles ending at `to`. A span of more than 20000 bars (`floor((to - from) / timeframe seconds) + 1`) is a 400 advising a shorter span or a larger timeframe. A span with no candles is a 404 naming the provider, symbol and span; a span only partly covered by history returns what exists.
 
 ## Summary
 
@@ -33,9 +37,9 @@ Recommended next: Twelve Data and Alpha Vantage as the free-key equity and FX so
 - Symbol listing: `GET /api/v3/exchangeInfo`.
 - Candles: `GET /api/v3/klines?symbol=&interval=&limit=&endTime=`.
 - Timeframes: 1s, 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 6h, 8h, 12h, 1d, 3d, 1w, 1M.
-- History: 1000 per request, paginate backwards with `endTime`; overall back to the pair's listing date.
+- History: 1000 per request, paginate backwards with `endTime`; overall back to the pair's listing date. A span (`from`/`to`) starts at `endTime = to*1000 + 999` and pages back until the oldest kline is at or before `from`.
 - Rate limits: weight based, 6000 weight per minute per IP (reported by `exchangeInfo`); a klines call costs 2 weight. [Docs](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/general-api-information).
-- CORS / proxy: CORS `*`. Proxy hosts already allowed: `api.binance.com`, `api1`-`api4.binance.com`, `data-api.binance.vision`. The `.com` host is region blocked in some countries; `data-api.binance.vision` is the market-data-only mirror.
+- Server hosts: `api.binance.com`, falling back to `data-api.binance.vision`. The `.com` host is region blocked in some countries; `data-api.binance.vision` is the market-data-only mirror. The browser does not call these (CORS `*` was observed).
 - Live: websocket `wss://stream.binance.com:9443/ws/<symbol>@kline_<interval>` (used by Vost). [Docs](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams).
 - Key: none for market data.
 - ToS: market data is for personal use; redistribution needs Binance's permission. [Terms](https://www.binance.com/en/terms).
@@ -47,9 +51,9 @@ Recommended next: Twelve Data and Alpha Vantage as the free-key equity and FX so
 - Symbol listing: no list; search with `GET /v1/finance/search?q=`.
 - Candles: `GET /v8/finance/chart/<symbol>?interval=&range=`.
 - Timeframes: 1m, 2m, 5m, 15m, 30m, 60m/1h, 1d, 5d, 1wk, 1mo, 3mo. No 4h.
-- History: intraday is capped (1m about 7 days, sub-hour about 60 days, 1h about 2 years); daily and up goes back to listing. Undocumented limits as observed by the community; Yahoo publishes no official API docs.
+- History: intraday is capped (1m about 7 days, sub-hour about 60 days, 1h about 2 years); daily and up goes back to listing. Undocumented limits as observed by the community; Yahoo publishes no official API docs. A span uses `period1=from&period2=to+1` instead of `range=`; an intraday `from` older than the depth above is a 400 naming the earliest time served.
 - Rate limits: unpublished; HTTP 429 when exceeded, and datacenter IPs are throttled harder.
-- CORS / proxy: no CORS headers, so the proxy is needed. Proxy hosts already allowed: `query1.finance.yahoo.com`, `query2.finance.yahoo.com`.
+- Server hosts: `query1.finance.yahoo.com` (no CORS headers, so only a server can call it).
 - Live: none (quotes are delayed by up to 15 minutes on some exchanges).
 - Key: none.
 - ToS: the API is unofficial and for personal use only; no redistribution. [Yahoo terms](https://legal.yahoo.com/us/en/yahoo/terms/otos/index.html).
@@ -61,9 +65,9 @@ Recommended next: Twelve Data and Alpha Vantage as the free-key equity and FX so
 - Symbol listing: none by API; symbols are looked up on the website.
 - Candles: `GET /q/d/l/?s=<symbol>&i=<d|w|m>` returns CSV.
 - Timeframes: daily, weekly, monthly only.
-- History: whole available history in one response.
+- History: whole available history in one response. A span is cropped from that one response.
 - Rate limits: unpublished; a daily hit limit exists and is enforced by a bot check.
-- CORS / proxy: proxy needed. Proxy hosts already allowed: `stooq.com`, `stooq.pl`.
+- Server hosts: `stooq.com` (no CORS headers, so only a server can call it).
 - Live: none.
 - Key: none, though recent Stooq changes may require a browser-solved challenge.
 - ToS: no API terms published; treat as personal use. [Site](https://stooq.com).
@@ -75,9 +79,9 @@ Recommended next: Twelve Data and Alpha Vantage as the free-key equity and FX so
 - Symbol listing: `GET https://api.exchange.coinbase.com/products`.
 - Candles: `GET /products/<id>/candles?granularity=<seconds>&start=&end=`.
 - Timeframes: 1m, 5m, 15m, 1h, 6h, 1d only (granularity 60, 300, 900, 3600, 21600, 86400). No 4h; build it from 1h. Vost offers 1m, 5m, 15m, 1h and 1d (it has no 6h timeframe).
-- History: at most 300 candles per request; paginate by `start`/`end`. Candles are only returned for periods with trades.
+- History: at most 300 candles per request; paginate by `start`/`end`. Candles are only returned for periods with trades. A span steps fixed 300-candle windows from `to` back to `from` by time, so a window without trades does not end it early.
 - Rate limits: public endpoints 10 requests per second per IP (burst 15). [Docs](https://docs.cdp.coinbase.com/exchange/docs/rest-rate-limits).
-- CORS / proxy: CORS `*`, so direct calls work. For the proxy add `api.exchange.coinbase.com`.
+- Server hosts: `api.exchange.coinbase.com` (CORS `*` was observed, but the server makes the call).
 - Live: websocket `wss://ws-feed.exchange.coinbase.com`. [Docs](https://docs.cdp.coinbase.com/exchange/docs/websocket-overview). The feed has no candle channel, so Vost does not offer live streaming for Coinbase.
 - Key: none for market data.
 - ToS: market data is for use by the user; redistribution is restricted. [Terms](https://www.coinbase.com/legal/market_data).
@@ -90,9 +94,9 @@ Recommended next: Twelve Data and Alpha Vantage as the free-key equity and FX so
 - Symbol listing: `GET https://api.kraken.com/0/public/AssetPairs`.
 - Candles: `GET /0/public/OHLC?pair=&interval=<minutes>&since=`.
 - Timeframes: 1, 5, 15, 30, 60, 240, 1440, 10080, 21600 minutes.
-- History: the last 720 candles only, regardless of `since`. Longer history needs the trades endpoint or the downloadable CSV files. Vost therefore caps Kraken history at 720 bars.
+- History: the last 720 candles only, regardless of `since`. Longer history needs the trades endpoint or the downloadable CSV files. Vost therefore caps Kraken history at 720 bars. A span is cropped from those 720; a span that ends before them is a 404 naming the earliest time served.
 - Rate limits: public calls share a counter per IP; roughly 1 call per second sustained. [Docs](https://docs.kraken.com/api/docs/guides/spot-rest-ratelimits).
-- CORS / proxy: no CORS headers seen, so use the proxy. Add `api.kraken.com`.
+- Server hosts: `api.kraken.com` (no CORS headers seen).
 - Live: websocket v2 `wss://ws.kraken.com/v2`. [Docs](https://docs.kraken.com/api/docs/websocket-v2/ohlc).
 - Key: none for public data.
 - ToS: [Kraken terms](https://www.kraken.com/legal); redistribution not permitted without agreement.
@@ -105,9 +109,9 @@ Recommended next: Twelve Data and Alpha Vantage as the free-key equity and FX so
 - Symbol listing: `GET https://api.bybit.com/v5/market/instruments-info?category=spot`.
 - Candles: `GET /v5/market/kline?category=&symbol=&interval=&limit=&start=&end=`.
 - Timeframes: 1, 3, 5, 15, 30, 60, 120, 240, 360, 720 minutes, D, W, M.
-- History: 1000 per request, paginate with `end`; overall back to listing.
+- History: 1000 per request, paginate with `end`; overall back to listing. A span starts at `end = to*1000 + 999` and pages back until `from`.
 - Rate limits: 600 requests per 5 seconds per IP across HTTP. [Docs](https://bybit-exchange.github.io/docs/v5/rate-limit).
-- CORS / proxy: the server echoes the request origin in `access-control-allow-origin`, so direct calls work. For the proxy add `api.bybit.com`. Bybit blocks some regions (for example the US); use `api.bytick.com` as the alternate host (verify).
+- Server hosts: `api.bybit.com` (the server echoes the request origin in `access-control-allow-origin`, but the Vost server makes the call). Bybit blocks some regions (for example the US); use `api.bytick.com` as the alternate host (verify).
 - Live: websocket `wss://stream.bybit.com/v5/public/spot`. [Docs](https://bybit-exchange.github.io/docs/v5/ws/connect).
 - Key: none for market data.
 - ToS: [Bybit terms](https://www.bybit.com/en/help-center/article/Terms-of-Service); personal use.
@@ -120,9 +124,9 @@ Recommended next: Twelve Data and Alpha Vantage as the free-key equity and FX so
 - Symbol listing: `GET https://www.okx.com/api/v5/public/instruments?instType=SPOT`.
 - Candles: `GET /api/v5/market/candles` (recent, up to 300) and `/api/v5/market/history-candles` (older, up to 100 per request), with `instId`, `bar`, `after`/`before` cursors.
 - Timeframes: 1m, 3m, 5m, 15m, 30m, 1H, 2H, 4H, 6H, 12H, 1D, 1W, 1M and others.
-- History: 100 per request on `history-candles`, paginate by cursor; deep history is available.
+- History: 100 per request on `history-candles`, paginate by cursor; deep history is available. A span starts at `after = (to+1)*1000` and pages back until `from`.
 - Rate limits: 20 requests per 2 seconds per IP for candle endpoints. [Docs](https://www.okx.com/docs-v5/en/#overview-rate-limits).
-- CORS / proxy: origin is echoed, so direct calls work. For the proxy add `www.okx.com`.
+- Server hosts: `www.okx.com` (origin is echoed, but the Vost server makes the call).
 - Live: websocket `wss://ws.okx.com:8443/ws/v5/business` for candles. [Docs](https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-candlesticks-channel).
 - Key: none for public data.
 - ToS: [OKX terms](https://www.okx.com/help/terms-of-service); personal use.
@@ -139,7 +143,7 @@ Not requested from the container (needs a key). Facts are from the provider docs
 - Timeframes: intraday 1, 5, 15, 30, 60 min, then daily, weekly, monthly.
 - History: `outputsize=full` returns the full daily history (20+ years); intraday goes back by month with the `month` parameter. Some intraday and adjusted endpoints are premium only.
 - Rate limits: free tier is 25 requests per day (verify). [Docs](https://www.alphavantage.co/documentation/), [premium plans](https://www.alphavantage.co/premium/).
-- CORS / proxy: not checked; plan on the proxy. Add `www.alphavantage.co`.
+- Server hosts: `www.alphavantage.co` (browser CORS not checked; the server would make the call).
 - Live: none (polling only).
 - Key: free key from the site; sent as the `apikey` query parameter, so the key would sit in the proxied URL.
 - ToS: free tier is for personal, non-commercial use. [Terms](https://www.alphavantage.co/terms_of_service/).
@@ -154,7 +158,7 @@ Not requested from the container (needs a key); verify before building.
 - Timeframes: 1min, 5min, 15min, 30min, 45min, 1h, 2h, 4h, 1day, 1week, 1month.
 - History: up to 5000 points per request; overall depth varies by symbol.
 - Rate limits: free "Basic" plan is 8 requests per minute and 800 per day (verify). [Docs](https://twelvedata.com/docs), [pricing](https://twelvedata.com/pricing).
-- CORS / proxy: not checked; plan on the proxy. Add `api.twelvedata.com`.
+- Server hosts: `api.twelvedata.com` (browser CORS not checked; the server would make the call).
 - Live: websocket exists; availability on the free plan is limited (verify).
 - Key: free key; `apikey` query parameter or `Authorization` header.
 - ToS: free plan is for personal use; data display and redistribution rules per exchange. [Terms](https://twelvedata.com/terms).
@@ -169,7 +173,7 @@ Not requested from the container (needs a key); verify before building.
 - Timeframes: 1, 5, 15, 30, 60, D, W, M.
 - History: by `from`/`to` range.
 - Rate limits: 60 API calls per minute on the free plan, with a 30 per second hard cap (verify). [Docs](https://finnhub.io/docs/api), [pricing](https://finnhub.io/pricing).
-- CORS / proxy: not checked; plan on the proxy. Add `finnhub.io`.
+- Server hosts: `finnhub.io` (browser CORS not checked; the server would make the call).
 - Live: websocket `wss://ws.finnhub.io` for trades.
 - Key: free key; `token` query parameter or `X-Finnhub-Token` header (the header keeps the key out of the URL).
 - ToS: personal use on free plans. [Terms](https://finnhub.io/terms-of-service).
@@ -184,7 +188,7 @@ Not requested from the container (needs a key); verify before building.
 - Timeframes: daily and up for equities; intraday from 1min via IEX, FX and crypto.
 - History: end-of-day history goes back decades; intraday history is limited.
 - Rate limits: free plan about 50 requests per hour, 1000 per day and 500 unique symbols per month (verify). [Docs](https://www.tiingo.com/documentation/general/overview), [pricing](https://www.tiingo.com/about/pricing).
-- CORS / proxy: not checked; plan on the proxy. Add `api.tiingo.com`.
+- Server hosts: `api.tiingo.com` (browser CORS not checked; the server would make the call).
 - Live: websocket for IEX, FX and crypto (restricted on the free plan, verify).
 - Key: free token; `Authorization: Token <key>` header or `token` query parameter.
 - ToS: free plan is for personal use only. [Terms](https://www.tiingo.com/about/terms).

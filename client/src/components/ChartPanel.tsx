@@ -19,6 +19,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { candlesToCsv, downloadDataUrl, downloadFile, sanitizeFileName } from '../lib/export';
 import { fmtCompact, fmtPct, fmtPrice, fmtTime } from '../lib/format';
+import { fmtTick } from '../lib/time';
 import { computeIndicator, hexToRgba, type ComputedSeries } from '../lib/indicatorCompute';
 import { getProvider } from '../lib/providers';
 import { useStore } from '../state/store';
@@ -29,6 +30,7 @@ type IndEntry = {
   kind: ComputedSeries['kind'];
 };
 
+const RIGHT_OFFSET = 3;
 const UP = '#22c55e';
 const DOWN = '#ef4444';
 
@@ -60,6 +62,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
   const pineRuns = useStore((s) => s.pineRuns);
   const providerId = useStore((s) => s.providerId);
   const setProvider = useStore((s) => s.setProvider);
+  const timeZone = useStore((s) => s.timeZone);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const legendRef = useRef<HTMLDivElement | null>(null);
@@ -108,9 +111,13 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
         borderColor: '#1e2433',
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 3,
+        rightOffset: RIGHT_OFFSET,
+        tickMarkFormatter: (t: Time, type: number) => fmtTick(t as number, type, useStore.getState().timeZone),
       },
-      localization: { locale: 'en-US' },
+      localization: {
+        locale: 'en-US',
+        timeFormatter: (t: Time) => fmtTime(t as number, { timeZone: useStore.getState().timeZone }),
+      },
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
@@ -292,7 +299,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
         `<div class="legend-ohlc">` +
         `O <b>${fmtPrice(c.open)}</b> H <b>${fmtPrice(c.high)}</b> L <b>${fmtPrice(c.low)}</b> C <b>${fmtPrice(c.close)}</b> ` +
         `<span class="${cls}">${fmtPct(chg)}</span> V <b>${fmtCompact(c.volume)}</b> ` +
-        `<span class="muted-2">${fmtTime(c.time)}</span>` +
+        `<span class="muted-2">${fmtTime(c.time, { timeZone: useStore.getState().timeZone })}</span>` +
         `</div>`;
     });
   }
@@ -319,6 +326,19 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
     return () => chart.unsubscribeCrosshairMove(handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chartApi, dataLabel]);
+
+  /* Zone change: swap the formatters in place (no rebuild, visible range untouched) and redraw the legend. */
+  useEffect(() => {
+    const chart = chartApi;
+    if (!chart) return;
+    chart.applyOptions({
+      localization: { timeFormatter: (t: Time) => fmtTime(t as number, { timeZone }) },
+      timeScale: { tickMarkFormatter: (t: Time, type: number) => fmtTick(t as number, type, timeZone) },
+    });
+    const last = useStore.getState().candles.at(-1);
+    if (last) updateLegend(last);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartApi, timeZone]);
 
   /* ---------------- trade markers ---------------- */
   useEffect(() => {
@@ -352,12 +372,34 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
 
   const provider = getProvider(providerId);
 
+  // Restore the fresh-load view: auto-scale every pane's price scales, default right offset, fit all data.
+  function resetView() {
+    if (!chartApi) return;
+    const panes = chartApi.panes();
+    for (let i = 0; i < panes.length; i++) {
+      for (const id of i === 0 ? ['right', 'volume'] : ['right']) {
+        try {
+          chartApi.priceScale(id, i).applyOptions({ autoScale: true });
+        } catch {
+          // this pane has no such price scale
+        }
+      }
+    }
+    chartApi.timeScale().applyOptions({ rightOffset: RIGHT_OFFSET });
+    chartApi.timeScale().fitContent();
+  }
+
   return (
     <div className="chart-wrap">
       <div className="chart-legend" ref={legendRef} />
       <div className="chart-container" ref={containerRef} />
       <div className="chart-toolbar">
-        <button className="ghost icon" title="Fit all data" onClick={() => chartApi?.timeScale().fitContent()}>
+        <button
+          className="ghost icon"
+          title="Reset view"
+          disabled={!chartApi || candles.length === 0}
+          onClick={resetView}
+        >
           ⤢
         </button>
         <button

@@ -5,7 +5,8 @@
  * Heavy computations run in a dedicated Web Worker; this module only talks to
  * it over a tiny promise-based message protocol.
  */
-import { applyKline } from '../lib/applyKline';
+import { applyKline, mergeCandles } from '../lib/applyKline';
+import { MAX_BARS, TIMEFRAME_SECONDS } from '../../../shared/market.ts';
 import { create } from 'zustand';
 import type { Candle, Dataset, Timeframe } from '../types';
 import { uid } from '../types';
@@ -20,9 +21,12 @@ import type { IndicatorKind, IndicatorSpec } from '../lib/indicatorCompute';
 import { defaultIndicator } from '../lib/indicatorCompute';
 import { appendMessage, markAllRead, type InboxMessage, type MessageSeverity } from '../lib/messages';
 import type { PineError, PineInputValue, PineResult, PineRunOutcome } from '../lib/pine/types';
-import type { LiveHandle, LiveStatus } from '../lib/providers/http';
+import type { HistoryRequest, LiveHandle, LiveStatus } from '../lib/providers/http';
 import { getProvider, providers, type SymbolSuggestion } from '../lib/providers';
-import { loadJson, saveJson, debounce } from '../lib/storage';
+import { loadJson, saveJson, debounce, removeKey } from '../lib/storage';
+import { fmtTime } from '../lib/format';
+import { browserTimeZone, isValidTimeZone } from '../lib/time';
+import { CHART_MIN_BARS, chartRangeErrorText, cropToChartRange, describeTimeRange, sanitizeTimeRange, sliceByTimeRange, timeRangeErrorText, type TimeRange } from '../lib/timeRange';
 import * as wl from '../lib/watchlist';
 import type { WorkerRequestBody, WorkerResponse } from '../lib/workers/backtest.worker';
 
@@ -56,6 +60,8 @@ interface Prefs {
   indicators: IndicatorSpec[];
   btConfig: BacktestConfig;
   showTrades: boolean;
+  timeZone?: string;
+  btRange?: TimeRange;
 }
 
 const PREFS_KEY = 'prefs.v1';
@@ -83,6 +89,8 @@ export interface AppState {
   bars: number;
   indicators: IndicatorSpec[];
   showTrades: boolean;
+  /** IANA zone every date on screen is shown in (candle times stay UTC). */
+  timeZone: string;
   /** Pine run state by indicator id (not persisted). */
   pineRuns: Record<string, PineRunState>;
 
@@ -90,6 +98,12 @@ export interface AppState {
   candles: Candle[];
   /** Changes whenever the full dataset is replaced (forces a chart rebuild). */
   dataKey: string;
+  /** Chart range window (UTC seconds) applied to the loaded bars; null = none (not persisted). */
+  chartRange: TimeRange | null;
+  /** The full loaded bars while a chart range crops `candles`; null otherwise. */
+  fullCandles: Candle[] | null;
+  /** True while `fullCandles` is a span fetched from the provider for the chart range. */
+  chartRangeFetched: boolean;
   dataLabel: string;
   activeDatasetId: string | null;
   loadState: LoadState;
@@ -104,6 +118,8 @@ export interface AppState {
 
   /* backtest */
   btConfig: BacktestConfig;
+  /** Time window the backtester and optimizer run on (UTC seconds, null = open end). */
+  btRange: TimeRange;
   btRunning: boolean;
   btProgress: number;
   btResult: BacktestResult | null;
@@ -167,7 +183,15 @@ export interface AppState {
   removeIndicator(id: string): void;
   updateIndicator(id: string, patch: Partial<Pick<IndicatorSpec, 'params' | 'color' | 'visible' | 'source'>> & { inputs?: Record<string, PineInputValue> }): void;
   setShowTrades(v: boolean): void;
+  setTimeZone(tz: string): void;
   setBtConfig(patch: Partial<BacktestConfig>): void;
+  setBtRange(range: TimeRange): void;
+  /**
+   * Shows a time window of the chart: crops the loaded bars, or fetches the span from the provider
+   * when it lies outside them; an open range clears. Resolves true when applied.
+   */
+  setChartRange(range: TimeRange): Promise<boolean>;
+  clearChartRange(): Promise<void>;
   runBacktest(): Promise<void>;
   refreshPineInputs(): Promise<void>;
   clearBacktest(): void;
@@ -265,6 +289,10 @@ function workerCall(req: WorkerRequestBody, onProgress?: (pct: number) => void):
 /* ------------------------------------------------------------------ */
 
 let liveHandle: LiveHandle | null = null;
+/** Bumped by every data load and chart range fetch; only the newest result may be applied. */
+let requestToken = 0;
+/** Bumped whenever a live stream starts or stops, so a late backfill can tell it is stale. */
+let liveSession = 0;
 
 /* ------------------------------------------------------------------ */
 /* Store                                                               */
@@ -281,6 +309,8 @@ export const useStore = create<AppState>()((set, get) => {
       indicators: s.indicators,
       btConfig: s.btConfig,
       showTrades: s.showTrades,
+      timeZone: s.timeZone,
+      btRange: s.btRange,
     } satisfies Prefs);
   }, 400);
 
@@ -353,6 +383,9 @@ export const useStore = create<AppState>()((set, get) => {
   const setCandles = (candles: Candle[], dataLabel: string, activeDatasetId: string | null) => {
     set({
       candles,
+      chartRange: null,
+      fullCandles: null,
+      chartRangeFetched: false,
       dataKey: uid('data_'),
       dataLabel,
       activeDatasetId,
@@ -364,7 +397,22 @@ export const useStore = create<AppState>()((set, get) => {
     schedulePineAll();
   };
 
+  const applyRange = (slice: Candle[], full: Candle[], range: TimeRange, fetched: boolean) => {
+    set({
+      candles: slice,
+      fullCandles: full,
+      chartRange: { from: range.from, to: range.to },
+      chartRangeFetched: fetched,
+      dataKey: uid('data_'),
+      btResult: null,
+      btError: null,
+      optResult: null,
+    });
+    schedulePineAll();
+  };
+
   const stopLive = () => {
+    liveSession++;
     liveHandle?.stop();
     liveHandle = null;
     set({ live: false, liveStatus: 'off', liveDetail: '' });
@@ -372,9 +420,13 @@ export const useStore = create<AppState>()((set, get) => {
 
   return {
     ...defaultPrefs,
+    timeZone: browserTimeZone(),
     pineRuns: {},
     candles: [],
     dataKey: '',
+    chartRange: null,
+    fullCandles: null,
+    chartRangeFetched: false,
     dataLabel: '',
     activeDatasetId: null,
     loadState: 'idle',
@@ -383,6 +435,7 @@ export const useStore = create<AppState>()((set, get) => {
     liveStatus: 'off',
     liveDetail: '',
     pineInputs: [],
+    btRange: { from: null, to: null },
     btRunning: false,
     btProgress: 0,
     btResult: null,
@@ -435,6 +488,8 @@ export const useStore = create<AppState>()((set, get) => {
     },
 
     init() {
+      // The exchange symbol lists used to be cached in the browser; the server caches them now.
+      for (const id of ['binance', 'coinbase', 'kraken', 'bybit', 'okx']) removeKey(`${id}.symbols.v1`);
       const prefs = loadJson<Prefs>(PREFS_KEY, defaultPrefs);
       const datasets = loadJson<Dataset[]>(DATASETS_KEY, []);
       set({
@@ -446,6 +501,8 @@ export const useStore = create<AppState>()((set, get) => {
         indicators: Array.isArray(prefs.indicators) && prefs.indicators.length > 0 ? prefs.indicators : defaultPrefs.indicators,
         btConfig: { ...defaultPrefs.btConfig, ...(prefs.btConfig ?? {}) },
         showTrades: prefs.showTrades ?? true,
+        timeZone: isValidTimeZone(prefs.timeZone) ? prefs.timeZone : browserTimeZone(),
+        btRange: sanitizeTimeRange(prefs.btRange),
         datasets: Array.isArray(datasets) ? datasets : [],
         optConfig: defaultOptimizeConfig({ ...defaultPrefs.btConfig, ...(prefs.btConfig ?? {}) }),
       });
@@ -493,15 +550,18 @@ export const useStore = create<AppState>()((set, get) => {
       const { providerId, symbol, timeframe, bars } = get();
       const provider = getProvider(providerId);
       const tf = provider.timeframes.includes(timeframe) ? timeframe : provider.defaultTimeframe;
+      const token = ++requestToken;
       set({ loadState: 'loading', timeframe: tf });
       try {
         const candles = await provider.fetchHistory({ symbol, timeframe: tf, bars });
+        if (token !== requestToken) return; // a newer load or range fetch owns the data now
         if (candles.length < 2) throw new Error(`Not enough data returned for ${symbol}.`);
         setCandles(candles, `${provider.name} · ${symbol} · ${tf}`, null);
         const s = get();
         if (s.live && provider.startLive) s.setLive(true); // reconnect for the new symbol/tf
         else if (s.live) s.setLive(false);
       } catch (err) {
+        if (token !== requestToken) return;
         set({ loadState: 'error' });
         get().pushToast('error', `Could not load data: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -511,6 +571,9 @@ export const useStore = create<AppState>()((set, get) => {
       stopLive();
       set({
         candles: [],
+        chartRange: null,
+        fullCandles: null,
+        chartRangeFetched: false,
         dataKey: uid('data_'),
         dataLabel: '',
         activeDatasetId: null,
@@ -541,7 +604,8 @@ export const useStore = create<AppState>()((set, get) => {
     },
 
     saveCurrentDataset(name) {
-      const { candles, dataLabel, activeDatasetId, providerId } = get();
+      const { candles: shown, fullCandles, dataLabel, activeDatasetId, providerId } = get();
+      const candles = fullCandles ?? shown;
       if (candles.length === 0) {
         get().pushToast('info', 'Nothing to save — load some data first.');
         return;
@@ -551,7 +615,7 @@ export const useStore = create<AppState>()((set, get) => {
         return;
       }
       get().addDataset({
-        name: name ?? `${dataLabel || 'Dataset'} · ${new Date().toLocaleDateString()}`,
+        name: name ?? `${dataLabel || 'Dataset'} · ${fmtTime(Date.now() / 1000, { dateOnly: true, timeZone: get().timeZone })}`,
         candles,
         source: providerId,
         description: dataLabel,
@@ -605,6 +669,12 @@ export const useStore = create<AppState>()((set, get) => {
       if (patch.source !== undefined || patch.inputs !== undefined || patch.visible === true) schedulePine(id);
     },
 
+    setTimeZone(tz) {
+      if (!isValidTimeZone(tz)) return;
+      set({ timeZone: tz });
+      persistPrefs();
+    },
+
     setShowTrades(v) {
       set({ showTrades: v });
       persistPrefs();
@@ -616,10 +686,98 @@ export const useStore = create<AppState>()((set, get) => {
       persistPrefs();
     },
 
+    setBtRange(range) {
+      set({ btRange: sanitizeTimeRange(range) });
+      persistPrefs();
+    },
+
+    async setChartRange(range) {
+      const state = get();
+      const full = state.fullCandles ?? state.candles;
+      const open = range.from == null && range.to == null;
+      if (open) {
+        await get().clearChartRange();
+        return true;
+      }
+      if (state.live) {
+        state.pushToast('error', 'Turn live off before cropping the chart: live bars land at the end of the full data.');
+        return false;
+      }
+      const crop = cropToChartRange(full, range);
+      if (crop.ok) {
+        applyRange(crop.slice, full, range, state.chartRangeFetched);
+        return true;
+      }
+      if (crop.error !== 'outside' || state.activeDatasetId != null) {
+        state.pushToast('error', chartRangeErrorText(crop.error));
+        return false;
+      }
+
+      // outside the provider's loaded bars: fetch that span
+      const { providerId, symbol, timeframe, bars } = state;
+      const provider = getProvider(providerId);
+      const token = ++requestToken;
+      const req: HistoryRequest = { symbol, timeframe, bars };
+      if (range.from != null) req.from = range.from;
+      if (range.to != null) req.to = range.to;
+      set({ loadState: 'loading' });
+      try {
+        const fetched = await provider.fetchHistory(req);
+        const now = get();
+        if (token !== requestToken || now.providerId !== providerId || now.symbol !== symbol || now.activeDatasetId != null || now.timeframe !== timeframe) {
+          return false; // stale: the user moved on, a newer request owns the state
+        }
+        const slice = sliceByTimeRange(fetched, range);
+        if (slice.length < CHART_MIN_BARS) {
+          set({ loadState: 'ready' });
+          now.pushToast('error', chartRangeErrorText('too-few-bars'));
+          return false;
+        }
+        applyRange(slice, fetched, range, true);
+        set({ loadState: 'ready' });
+        if (range.from != null && slice[0].time - range.from > TIMEFRAME_SECONDS[timeframe]) {
+          const date = fmtTime(slice[0].time, { timeZone: get().timeZone });
+          const text = `${provider.name} has data for this range only from ${date}`;
+          get().pushMessage(provider.name, 'warning', text);
+          get().pushToast('info', text);
+        }
+        return true;
+      } catch (err) {
+        if (token !== requestToken) return false;
+        set({ loadState: 'ready' });
+        get().pushToast('error', `Could not load range: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      }
+    },
+
+    async clearChartRange() {
+      const { fullCandles, chartRangeFetched } = get();
+      if (!fullCandles) return;
+      if (chartRangeFetched) {
+        await get().loadData(); // back to the latest bars; setCandles resets the range state
+        return;
+      }
+      set({
+        candles: fullCandles,
+        fullCandles: null,
+        chartRange: null,
+        dataKey: uid('data_'),
+        btResult: null,
+        btError: null,
+        optResult: null,
+      });
+      schedulePineAll();
+    },
+
     async runBacktest() {
-      const { candles, btConfig } = get();
-      if (candles.length < 3) {
+      const { candles: all, btConfig, btRange } = get();
+      if (all.length < 3) {
         get().pushToast('error', 'Load some data before running a backtest.');
+        return;
+      }
+      const { slice: candles, error } = describeTimeRange(all, btRange);
+      if (error) {
+        get().pushToast('error', timeRangeErrorText(error));
         return;
       }
       set({ btRunning: true, btProgress: 0, btError: null });
@@ -669,9 +827,14 @@ export const useStore = create<AppState>()((set, get) => {
     },
 
     async runOptimizer() {
-      const { candles, btConfig, optConfig } = get();
-      if (candles.length < 3) {
+      const { candles: all, btConfig, optConfig, btRange } = get();
+      if (all.length < 3) {
         get().pushToast('error', 'Load some data before optimizing.');
+        return;
+      }
+      const { slice: candles, error } = describeTimeRange(all, btRange);
+      if (error) {
+        get().pushToast('error', timeRangeErrorText(error));
         return;
       }
       set({ optRunning: true, optProgress: 0, optResult: null });
@@ -710,13 +873,64 @@ export const useStore = create<AppState>()((set, get) => {
         get().pushToast('info', `Live streaming is not available for ${provider.name} data.`);
         return;
       }
+      if (get().chartRangeFetched) {
+        // a fetched span is not the latest bars: reload them, which reconnects live
+        set({ live: true, liveStatus: 'connecting', liveDetail: '' });
+        void get().loadData().then(() => {
+          if (get().loadState === 'error') stopLive();
+        });
+        return;
+      }
+      void get().clearChartRange(); // live bars land at the end of the full data
+      liveSession++;
+      const session = liveSession;
       liveHandle?.stop();
       set({ live: true, liveStatus: 'connecting', liveDetail: '' });
+
+      // After an outage (the exchange feed or the connection to the server) the stream
+      // resumes at the current bar: fetch what was missed once and merge it by time.
+      let backfilling = false;
+      const backfill = async (): Promise<void> => {
+        const last = get().candles[get().candles.length - 1];
+        if (!last || backfilling) return;
+        backfilling = true;
+        const dataKey = get().dataKey;
+        const elapsed = Math.floor((Date.now() / 1000 - last.time) / (TIMEFRAME_SECONDS[timeframe] ?? 60));
+        const bars = Math.min(MAX_BARS, Math.max(2, elapsed + 2));
+        try {
+          const recent = await provider.fetchHistory({ symbol, timeframe, bars });
+          if (session !== liveSession || get().dataKey !== dataKey) return; // stopped or switched meanwhile
+          set({ candles: mergeCandles(get().candles, recent) });
+          schedulePineAll();
+        } catch (err) {
+          if (session !== liveSession) return;
+          get().pushMessage(
+            'Live',
+            'warning',
+            `Live data came back for ${symbol} ${timeframe}, but the bars missed meanwhile could not be loaded (${err instanceof Error ? err.message : String(err)}). The chart may have a gap; reload the data to fill it.`,
+          );
+        } finally {
+          backfilling = false;
+        }
+      };
+
+      // A drop can surface as reconnecting -> connecting -> live (the server relay opens a fresh upstream
+      // entry, so its first status is 'connecting'), so remember any disruption, not just the status before live.
+      let wasLive = false;
+      let disrupted = false;
       liveHandle = provider.startLive({
         symbol,
         timeframe,
         onLog: (severity, text) => get().pushMessage('Live', severity, text),
-        onStatus: (status, detail) => set({ liveStatus: status, liveDetail: detail ?? '', live: status !== 'off' }),
+        onStatus: (status, detail) => {
+          set({ liveStatus: status, liveDetail: detail ?? '', live: status !== 'off' });
+          if (status === 'reconnecting' || status === 'error' || (status === 'connecting' && wasLive)) disrupted = true;
+          if (status === 'live') {
+            if (disrupted) void backfill();
+            disrupted = false;
+            wasLive = true;
+          }
+        },
         onKline: (candle, closed) => {
           const prev = get().candles;
           const next = applyKline(prev, candle);

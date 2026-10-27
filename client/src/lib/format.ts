@@ -1,6 +1,7 @@
 /**
  * Number / date formatting helpers used across the UI.
  */
+import { browserTimeZone, formatInZone } from './time';
 
 export function fmtPrice(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return '—';
@@ -43,28 +44,27 @@ export function fmtNum(v: number | null | undefined, digits = 2): string {
   return v.toLocaleString('en-US', { maximumFractionDigits: digits, minimumFractionDigits: 0 });
 }
 
-const DATE_TIME_FMT = new Intl.DateTimeFormat('en-GB', {
-  year: 'numeric',
-  month: 'short',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-});
-
-const DATE_FMT = new Intl.DateTimeFormat('en-GB', {
-  year: 'numeric',
-  month: 'short',
-  day: '2-digit',
-});
-
-export function fmtTime(sec: number, opts: { dateOnly?: boolean } = {}): string {
-  const d = new Date(sec * 1000);
-  return opts.dateOnly ? DATE_FMT.format(d) : DATE_TIME_FMT.format(d);
+/** Formats in the given IANA zone; undefined means the browser zone. */
+export function fmtTime(sec: number, opts: { dateOnly?: boolean; timeZone?: string } = {}): string {
+  return formatInZone(sec, opts.timeZone ?? browserTimeZone(), { dateOnly: opts.dateOnly });
 }
 
 export function fmtDurationBarCount(bars: number): string {
   if (bars <= 0) return '0 bars';
   return bars === 1 ? '1 bar' : `${fmtNum(bars, 0)} bars`;
+}
+
+/** Loaded data span, e.g. "12 Dec 2012, 14:00 → 04 Feb 2020, 19:00 · 4,987 bars". Empty when there is no data. */
+export function fmtDataRange(
+  firstSec: number | null | undefined,
+  lastSec: number | null | undefined,
+  count: number,
+  opts: { live?: boolean; now?: number; timeZone?: string } = {},
+): string {
+  if (count <= 0 || firstSec == null || lastSec == null) return '';
+  const tz = { timeZone: opts.timeZone };
+  const end = opts.live ? `now ${fmtTime(opts.now ?? Date.now() / 1000, tz)}` : fmtTime(lastSec, tz);
+  return `${fmtTime(firstSec, tz)} → ${end} · ${fmtDurationBarCount(count)}`;
 }
 
 /** Human-readable bar interval, e.g. 3600 -> "1h". */

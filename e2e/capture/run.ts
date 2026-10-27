@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import type { Browser } from 'playwright';
+import { formatLaunchError } from './launch-error.ts';
 import { StepError, runScenario } from './scenario.ts';
 import { scenarios } from './scenarios/index.ts';
 
@@ -123,7 +124,7 @@ async function main(): Promise<string[]> {
     const baseUrl = `http://127.0.0.1:${port}`;
     server = spawn(process.execPath, ['server/index.mjs'], {
       cwd: ROOT,
-      env: { ...process.env, PORT: String(port), HOST: '127.0.0.1' },
+      env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', VOST_STATUS_INTERVAL: '0' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const serverOut = capture(server);
@@ -136,8 +137,7 @@ async function main(): Promise<string[]> {
     try {
       browser = await chromium.launch();
     } catch (err) {
-      const first = (err instanceof Error ? err.message : String(err)).split('\n')[0];
-      fail(`browser launch failed: ${first}\nIf Chromium is missing, run: npx playwright install chromium`);
+      fail(`browser launch failed: ${formatLaunchError(err instanceof Error ? err.message : String(err))}`);
     }
     const written: string[] = [];
     for (const name of names) {

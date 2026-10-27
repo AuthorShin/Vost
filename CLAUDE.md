@@ -27,7 +27,7 @@
   If something clearly looks off, even if it is not directly related to what you are doing, try to get it fixed along the way
   (a factory loop agent names it in its answer instead, since its change holds only what the brief asks).
 - For any PR that changes UI, capture a screenshot (and a short video/GIF for animated/interactive changes)
-  using this repo's e2e visual verification tooling (see `docs/e2e-visual-verification.md`), upload each capture with `callum-flow-evidence-upload pr-<N>/<slug> <file>...`
+  using this repo's e2e visual verification tooling (see `docs/e2e-visual-verification.md`), upload each capture with `fabriek-evidence-upload pr-<N>/<slug> <file>...`
   and attach the printed URLs to the PR description before the PR is considered ready. Commit an image only when it is a
   durable reference image the repo keeps.
 - Keep PR descriptions brief and concise. They are reviewed by a head of engineering, not an engineer,
@@ -37,7 +37,7 @@
   If you see one, even if it is not caused by what you are working on right now, still get it fixed.
   A factory loop agent fixes it only when it blocks the gates, and otherwise names it in its answer's summary.
 - Questions about factory latency, throughput or pipeline cost are answered from factory data via the
-  callum-flow `query-factory-data` skill, not from guesses.
+  fabriek `query-factory-data` skill, not from guesses.
 - When writing to the owner (chat replies, status updates, orchestrator reports, handoffs), lead with what
   needs to happen next and who has to do it. Name each piece of work by what it does, with the issue number at
   most a parenthetical and never the subject of a sentence. Make each issue or PR reference a markdown link to it,
@@ -83,14 +83,12 @@ Work in this repo takes one of two paths. A rule that names a path applies only 
   its title, body, issue link and evidence from your answer; it runs review, waits on CI and
   merges through its own queue. Follow your agent definition and your prompt. Work only in your
   slot and push only the issue's branch to `origin`. Never lease, return or create a worktree,
-  never run no-mistakes, and never follow the `implement-issue` or `issue-orchestrator` skills or
-  a section of this file marked as the manual path. Never write to GitHub: where a rule here says
+  and never follow a section of this file marked as the manual path. Never write to GitHub: where a rule here says
   to link, describe, attach to, label, merge or raise an issue or a PR, put what it needs in your
   answer and the loop does it.
-- **The manual path**, for a person or an interactive session. Code changes go in a worktree
-  (the mechanism is in "Implementation sub-agents" below). Run every canonical command once
-  before the PR opens: they are the same commands CI and `.claude/factory-loop.json`
-  `gateCommands` run.
+- **The manual path**, for a person or an interactive session. Code changes go in a worktree.
+  Run every canonical command once before the PR opens (they are the same commands CI and
+  `.claude/factory-loop.json` `gateCommands` run), then open a plain PR that links its issue.
 <!-- end synced -->
 
 <!-- repo-owned: edit freely - fill in the sections below for this repo -->
@@ -109,16 +107,16 @@ Install first with `npm ci` (the gate commands in `.claude/factory-loop.json` in
 | Gate | Command | CI (`.github/workflows/ci.yml`, job `ci`) |
 |---|---|---|
 | Lint (typecheck; there is no linter yet) | `npm run typecheck` | step "Lint (typecheck)" |
-| Test (Vitest, all `client/src/**/*.test.ts`) | `npm test` | step "Test" |
+| Test (Vitest, all `client/src/**/*.test.ts`, `server/**/*.test.ts`, `shared/**/*.test.ts`, `scripts/**/*.test.ts` and `e2e/**/*.test.ts`) | `npm test` | step "Test" |
 | Build | `npm run build` | step "Build client" |
 
 Non-gate command (UI evidence; never in a gate or CI; see `docs/e2e-visual-verification.md`):
-`npm run -s e2e:capture -- <scenario>` (scenarios: `chart`, `chart-pan`).
+`npm run -s e2e:capture -- <scenario>` (scenarios: `chart`, `chart-pan`, `chart-reset`, `chart-range`, `conn-status`, `zone-clock`, `bt-range`).
 
 One suite while debugging: `npm test -- client/src/lib/csv.test.ts`. Test output settings
 (dot reporter, silent) live in `vitest.config.ts`.
 
-CI also smoke-tests the server (`npm start`, then `/api/health` and `/`) on Node 20, 22 and 24,
+CI also smoke-tests the server (`npm start`, then `/api/health` and `/`) on Node 22 and 24,
 and builds and smoke-tests the Docker image (job `docker`). There is no e2e test suite, only the capture command above; run the
 server smoke test locally only when a change touches `server/` or the build.
 

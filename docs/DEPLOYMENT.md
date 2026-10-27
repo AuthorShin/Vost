@@ -3,16 +3,16 @@
 Vost is a static web client plus a tiny zero-dependency Node server. The server does exactly two things:
 
 1. serves `client/dist` (the built web app),
-2. forwards `/api/proxy?url=…` requests to an allow-list of market-data hosts (needed because Yahoo and Stooq send no CORS headers).
+2. answers the market-data API (`/api/providers`, `/api/history`, `/api/symbols`, `/api/search`): it calls the public provider APIs (Binance, Yahoo, Stooq, …) on the browser's behalf, because many of them send no CORS headers.
 
-There is no database and no server-side state. Everything else — fetch orchestration, CSV parsing, indicators, backtests — runs in the visitor's browser.
+There is no database; the only server-side state is an in-memory symbol-list cache. The server is TypeScript that Node runs directly (type stripping), so there is no server build step and no npm dependency at runtime. Everything else — fetch orchestration, CSV parsing, indicators, backtests — runs in the visitor's browser.
 
 - [Docker](#docker)
 - [Docker Compose](#docker-compose)
 - [Plain Node / systemd](#plain-node--systemd)
 - [Reverse proxy & TLS (nginx)](#reverse-proxy--tls-nginx)
 - [Behind a sub-path](#behind-a-sub-path)
-- [Static-only hosting](#static-only-hosting-vite_direct)
+- [Static-only hosting](#static-only-hosting)
 - [Environment variables](#environment-variables)
 - [Health checks & updates](#health-checks--updates)
 - [Troubleshooting](#troubleshooting)
@@ -46,16 +46,17 @@ The included `docker-compose.yml`:
 Updating:
 
 ```bash
-git pull
+git fetch --tags
+git checkout vX.Y.Z   # the release to run, from the Releases page
 docker compose up -d --build
 ```
 
 ## Plain Node / systemd
 
-Requirements: Node **24** recommended (`node --version`); Node 20.19+ is the minimum supported.
+Requirements: Node **24** recommended (`node --version`); Node 22.18+ is the minimum supported (older versions print `Vost needs Node 22.18 or newer` and exit).
 
 ```bash
-git clone https://github.com/AuthorShin/Vost.git
+git clone https://github.com/cbundy/Vost.git
 cd Vost
 npm ci            # or npm install
 npm run build     # typecheck + bundle -> client/dist
@@ -118,6 +119,17 @@ server {
     add_header X-Frame-Options SAMEORIGIN always;
     add_header Referrer-Policy strict-origin-when-cross-origin always;
 
+    # Live candles: a long-lived event stream, so no buffering and no short read timeout
+    location /api/live {
+        proxy_pass http://127.0.0.1:8787;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8787;
         proxy_http_version 1.1;
@@ -137,30 +149,22 @@ server {
 
 Notes:
 
+- `/api/live` is a server-sent-events stream. Without the `location /api/live` block above (`proxy_buffering off`, a long `proxy_read_timeout`) the proxy holds the events back or cuts the stream, and the live indicator will not recover cleanly. The server also sends a `: ping` comment every 15 s and replies with `X-Accel-Buffering: no`.
 - Hashed assets (`/assets/*.js`, `*.css`) are served with `Cache-Control: immutable`; `index.html` with `no-cache`. Don't override this — it's what makes updates instant.
-- If you gate the app behind HTTP basic auth or an SSO proxy, protect `/` **and** `/api/*` so the data proxy isn't left open.
-- Compressing `text/csv` upstream responses is skipped on purpose; the proxy streams them through untouched.
+- If you gate the app behind HTTP basic auth or an SSO proxy, protect `/` **and** `/api/*` so the market-data API isn't left open.
 
 ## Behind a sub-path
 
-The proxy path prefix is fixed at build time via `VITE_PROXY_PREFIX` (default `/api/proxy`) but the client assumes it's served from the domain root. The simplest reliable setup for `https://example.com/charts/` is to keep Vost at the root, or mount it on a dedicated subdomain (`charts.example.com`) and use the nginx block above. Sub-path mounting is possible with a prefix-stripping proxy but is not a tested configuration yet.
+The client calls `/api/...` with absolute paths, so it assumes it's served from the domain root. The simplest reliable setup for `https://example.com/charts/` is to keep Vost at the root, or mount it on a dedicated subdomain (`charts.example.com`) and use the nginx block above. Sub-path mounting is possible with a prefix-stripping proxy but is not a tested configuration yet.
 
-## Static-only hosting (`VITE_DIRECT=true`)
+## Static-only hosting
 
-You can skip the Node server entirely (GitHub Pages, Netlify, S3, nginx serving files) by building with direct upstream fetches:
+You can skip the Node server (GitHub Pages, Netlify, S3, nginx serving files) by deploying `client/dist/` anywhere, but only the offline features work there:
 
-```bash
-VITE_DIRECT=true npm run build
-# deploy client/dist/ anywhere
-```
+- **CSV import, the Demo provider and all backtesting work** - they never touch the network.
+- **Every remote provider (Binance, Coinbase, Kraken, Bybit, OKX, Yahoo, Stooq) needs the Node server**: the browser no longer calls those APIs itself, so without `/api/*` they fail to load.
 
-In this mode the browser calls the exchanges / Yahoo / Stooq directly. Consequences:
-
-- **Binance and Coinbase work** (they send permissive CORS headers). Bybit and OKX echo the request origin, so they are expected to work too; Kraken sends no CORS headers and needs the Node proxy.
-- **Yahoo and Stooq do not send CORS headers** — those providers will fail in the browser (their JSON is still useful via the Node proxy; use Docker/Node for them).
-- **CSV import, the Demo provider and all backtesting are unaffected** — they never touch the network.
-
-`npm run dev` automatically proxies `/api/*` from Vite (:5173) to the Node server (:8787), so development always uses the whitelist path.
+`npm run dev` automatically proxies `/api/*` from Vite (:5173) to the Node server (:8787).
 
 ## Environment variables
 
@@ -168,28 +172,28 @@ In this mode the browser calls the exchanges / Yahoo / Stooq directly. Consequen
 |---|---|---|---|
 | `PORT` | server (runtime) | `8787` | HTTP listen port |
 | `HOST` | server (runtime) | `0.0.0.0` | Bind address; use `127.0.0.1` behind a proxy |
+| `VOST_STATUS_INTERVAL` | server (runtime) | `60` | Seconds between background health checks of the exchanges (see `/api/status`); `0` turns them off, and the status then stays `unknown` until someone presses "Test now" or real requests report in |
 | `VOST_SERVER_URL` | Vite dev server | `http://localhost:8787` | Upstream for the dev-time `/api` proxy |
-| `VITE_DIRECT` | client (build time) | unset | `true` → fetch upstreams directly, no proxy |
-| `VITE_PROXY_PREFIX` | client (build time) | `/api/proxy` | Proxy path prefix baked into the bundle |
 
-Runtime variables are read once at process start; build-time variables are **baked into the bundle** — rebuild to change them. See [`.env.example`](../.env.example).
+Variables are read once at process start. See [`.env.example`](../.env.example).
 
 ## Health checks & updates
 
-- `GET /api/health` → `{ ok, version, uptimeSeconds, node, clientsBuilt }`. Use it for Docker health checks, uptime monitors and load-balancer probes.
-- Updating = `git pull && npm ci && npm run build && restart`. Hashed asset filenames change, so clients pick up the new build on next load; no cache-busting dance needed.
+- `GET /api/health` → `{ ok, version, uptimeSeconds, node, clientsBuilt }`. `version` is the running release (the top bar and the startup log show the same number). Use it for Docker health checks, uptime monitors and load-balancer probes.
+- `GET /api/status` → `{ server: { state, version, uptimeSeconds }, intervalSeconds, checks: [...] }`: one check per exchange and data type (price history, symbol lookup, live stream; 17 in all), each with `state` (`ok`, `degraded`, `down`, `unknown`), `latencyMs`, `checkedAt`, `lastOkAt`, `error` and `source` (`probe`, `relay` or `traffic`). It backs the connection light in the top bar; add `?refresh=1` to run a fresh round of checks first (rate limited: a refresh within 15 s of the last round reuses it). Unlike `/api/health` it reports on the exchanges, not just on Vost. The server makes these test requests itself about every `VOST_STATUS_INTERVAL` seconds, so an outbound firewall must allow the same exchange hosts as the data requests, and every state change is logged as `[status] <provider> <feed> <old> -> <new>`.
+- Updating to a release = `git fetch --tags && git checkout vX.Y.Z && npm ci && npm run build && restart`. Hashed asset filenames change, so clients pick up the new build on next load; no cache-busting dance needed.
 - The server never writes to disk at runtime; back it with any read-only filesystem if you like.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| `Host "…" is not in the Vost proxy allowlist` | A provider called a host that isn't listed. Add it to `ALLOWED_HOSTS` in `server/index.mjs` (only if you trust it). |
-| Yahoo returns `429` | Shared/datacenter IPs are rate-limited by Yahoo's edge. The proxy retries automatically; if it persists, wait or switch networks. CSV import always works. |
+| `Vost needs Node 22.18 or newer` | The server runs TypeScript directly and needs Node 22.18+ (24 recommended). Upgrade Node. |
+| Yahoo returns `429` | Shared/datacenter IPs are rate-limited by Yahoo's edge. The server retries automatically; if it persists, wait or switch networks. CSV import always works. |
 | Stooq returns `403` (HTML challenge) | Stooq's bot protection challenges many cloud/VPS IPs. Use Yahoo, Binance or CSV import instead. |
-| Stale page after deploy | Hard-refresh once. `index.html` is `no-cache`, but the browser↔proxy layer may cache HTML — check your reverse proxy isn't overriding `Cache-Control`. |
+| Stale page after deploy | Hard-refresh once. `index.html` is `no-cache`, but a layer between the browser and Vost may cache HTML — check your reverse proxy isn't overriding `Cache-Control`. |
 | Port already in use | `PORT=9090 npm start`, or update `docker-compose.yml`. |
-| Client shows "fetch failed" but the server is fine | You're hitting a static-only deployment without the proxy. Rebuild without `VITE_DIRECT`, or serve via the Node server. |
+| Client shows "HTTP 404" or "fetch failed" for a remote provider | You're on a static-only deployment without the Node server. Serve the app through the Node server (or Docker). |
 
 ## Data provider terms
 

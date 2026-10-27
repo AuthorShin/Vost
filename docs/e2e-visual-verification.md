@@ -9,6 +9,11 @@ It is not a test suite: it is in no gate and must never run from CI or a gate co
 npm ci
 npm run -s e2e:capture -- chart                 # docs/evidence/chart/chart-desktop.png, chart-narrow.png
 npm run -s e2e:capture -- chart-pan             # docs/evidence/chart-pan/chart-pan.webm (+ .gif if ffmpeg is on PATH)
+npm run -s e2e:capture -- chart-reset           # docs/evidence/chart-reset/{fresh,moved,reset}.png + chart-reset.webm
+npm run -s e2e:capture -- chart-range          # docs/evidence/chart-range/chart-range-{before,applied,refused,fetched,cleared}-{desktop,narrow}.png
+npm run -s e2e:capture -- bt-range              # docs/evidence/bt-range/bt-range-{no-range,range,from-after-to}-{desktop,narrow}.png
+npm run -s e2e:capture -- conn-status           # docs/evidence/conn-status/conn-status-{closed,open}-{desktop,narrow}.png (stubbed /api/status)
+npm run -s e2e:capture -- zone-clock            # docs/evidence/zone-clock/zone-clock-{clock,list,filtered,tehran}-{desktop,narrow}.png
 npm run -s e2e:capture -- chart --slug my-fix   # everything goes to docs/evidence/my-fix/
 ```
 
@@ -20,8 +25,14 @@ What it does: builds the client, starts `server/index.mjs` on a free port bound 
 `/api/health`, runs each scenario in headless Chromium, then stops the browser and the server. A failing
 step exits non-zero within about 15 s with `e2e:capture: scenario "<name>" step "<step>" failed: <reason>`.
 
-Chromium comes from the Playwright cache (`playwright` is pinned to 1.64.1, nothing is downloaded on `npm ci`).
-If it is missing, run `npx playwright install chromium`.
+The dev container image ships Chromium at `/ms-playwright` (via `PLAYWRIGHT_BROWSERS_PATH`) at the pinned
+Playwright version (`playwright` is pinned to 1.64.1, nothing is downloaded on `npm ci`).
+On a machine outside the container, run `npx playwright install --with-deps chromium`.
+
+Troubleshooting a failed browser launch: `error while loading shared libraries: <lib>` means the container
+predates the Chromium image change (rebuild it) or, outside it, that the system libraries are missing (run the
+`--with-deps` install above). `Executable doesn't exist` means the browser download is missing
+(`npx playwright install chromium`).
 
 ## Demo data, offline
 
