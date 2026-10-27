@@ -130,8 +130,13 @@ describe('fake upstream live feeds, through the real socket and WebSocket', () =
         await w.until(() => w.klines.length >= 1, 'the first kline');
         const first = w.klines[0];
         expect(first.close).toBeGreaterThan(0);
-        await w.until(() => w.klines.some((k) => k.close !== first.close), 'a kline with a changed close');
-        expect(w.klines.every((k) => k.time === first.time)).toBe(true);
+        // The same bar (same open time) must be re-sent with a different close: the forming candle updates in place.
+        // A minute rollover mid-test only starts a new bar, which then updates in place too.
+        await w.until(
+          () => w.klines.some((a) => w.klines.some((b) => a.time === b.time && a.close !== b.close)),
+          'a forming bar re-sent with a changed close',
+        );
+        expect(w.klines.every((k) => k.time >= first.time && k.time <= first.time + 60)).toBe(true);
         expect(w.statuses).toContain('live');
       } finally {
         w.socket.close();
