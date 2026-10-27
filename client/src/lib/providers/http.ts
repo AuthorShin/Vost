@@ -12,6 +12,9 @@ export interface HistoryRequest {
   timeframe: Timeframe;
   /** Target number of bars (the provider may return fewer). */
   bars: number;
+  /** Time span (unix seconds, both ends inclusive); with `from` the span wins over `bars`. */
+  from?: number;
+  to?: number;
 }
 
 /** The server's feed states, plus `off` for a stream the client closed. */
