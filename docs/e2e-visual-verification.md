@@ -13,6 +13,7 @@ npm run -s e2e:capture -- chart-reset           # docs/evidence/chart-reset/{fre
 npm run -s e2e:capture -- chart-range          # docs/evidence/chart-range/chart-range-{before,applied,refused,fetched,cleared}-{desktop,narrow}.png
 npm run -s e2e:capture -- bt-range              # docs/evidence/bt-range/bt-range-{no-range,range,from-after-to}-{desktop,narrow}.png
 npm run -s e2e:capture -- zone-clock            # docs/evidence/zone-clock/zone-clock-{clock,list,filtered,tehran}-{desktop,narrow}.png
+npm run -s e2e:capture -- pine-tab             # docs/evidence/pine-tab/pine-tab-{sidebar-edit,editor,error,collapsed-edit,empty}-{desktop,narrow}.png
 npm run -s e2e:capture -- chart --slug my-fix   # everything goes to docs/evidence/my-fix/
 ```
 

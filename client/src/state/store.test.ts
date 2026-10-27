@@ -744,3 +744,34 @@ describe('chartRange fetched from the provider', () => {
     expect(useStore.getState().toasts.some((t) => t.text === 'Range is outside this dataset')).toBe(true);
   });
 });
+
+describe('pine editor selection', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    stubStorage();
+  });
+
+  it('openPineEditor opens the Pine tab on the indicator and expands the dock', async () => {
+    const { useStore } = await import('./store');
+    track(useStore);
+    const id = useStore.getState().addIndicator('pine');
+    useStore.getState().setDockCollapsed(true);
+    useStore.getState().openPineEditor(id);
+    const st = useStore.getState();
+    expect(st.dockTab).toBe('pine');
+    expect(st.selectedPineId).toBe(id);
+    expect(st.dockCollapsed).toBe(false);
+  });
+
+  it('removing the selected Pine indicator moves the selection', async () => {
+    const { useStore } = await import('./store');
+    track(useStore);
+    const a = useStore.getState().addIndicator('pine');
+    const b = useStore.getState().addIndicator('pine');
+    useStore.getState().openPineEditor(b);
+    useStore.getState().removeIndicator(b);
+    expect(useStore.getState().selectedPineId).toBe(a);
+    useStore.getState().removeIndicator(a);
+    expect(useStore.getState().selectedPineId).toBeNull();
+  });
+});
