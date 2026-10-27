@@ -15,6 +15,10 @@ PineTS is licensed AGPL-3.0-only. Vost itself is unchanged and remains MIT-licen
 - The backtest worker handles a `pine` request asynchronously and replies with `pineResult`. The main thread never executes Pine.
 - `inputs` overrides input defaults by input title.
 
+## Editing
+
+Pine indicators are edited in the bottom dock's Pine tab. The sidebar's Edit button on a Pine indicator opens it.
+
 ## Fixtures
 
 `client/src/lib/pine/fixtures/*.pine` hold example scripts (EMA cross, MACD, RSI, Bollinger Bands, two strategies, and a syntax error). `runtime.test.ts` checks plot values against `client/src/lib/indicators.ts`.

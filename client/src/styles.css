@@ -1612,3 +1612,69 @@ a:hover {
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* ------------------------------ pine tab ------------------------------ */
+
+.dock-body.pine {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.pine-tab,
+.pine-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.pine-tab-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.pine-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.pine-entry-editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.pine-entry-editor .pine-editor {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.pine-entry-editor .pine-editor .cm-editor {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.pine-entry > .indicator-params,
+.pine-entry > .pine-error {
+  flex-shrink: 0;
+  max-height: 96px;
+  overflow-y: auto;
+}
+
+.pine-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100%;
+}

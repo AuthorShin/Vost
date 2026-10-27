@@ -1,10 +1,8 @@
 import { INDICATOR_META, type IndicatorKind } from '../lib/indicatorCompute';
 import { downloadFile, candlesToCsv, sanitizeFileName } from '../lib/export';
 import { fmtNum, fmtTime } from '../lib/format';
-import type { PineInput, PineInputValue } from '../lib/pine/types';
 import { Watchlist } from './Watchlist';
-import { PineEditor } from './PineEditor';
-import { useStore, type PineRunState } from '../state/store';
+import { useStore } from '../state/store';
 
 export function Sidebar({ onImportCsv }: { onImportCsv: () => void }) {
   const symbol = useStore((s) => s.symbol);
@@ -18,9 +16,9 @@ export function Sidebar({ onImportCsv }: { onImportCsv: () => void }) {
   const activateDataset = useStore((s) => s.activateDataset);
   const removeDataset = useStore((s) => s.removeDataset);
   const addIndicator = useStore((s) => s.addIndicator);
+  const openPineEditor = useStore((s) => s.openPineEditor);
   const removeIndicator = useStore((s) => s.removeIndicator);
   const updateIndicator = useStore((s) => s.updateIndicator);
-  const pineRuns = useStore((s) => s.pineRuns);
 
   const first = candles[0];
   const last = candles[candles.length - 1];
@@ -151,6 +149,16 @@ export function Sidebar({ onImportCsv }: { onImportCsv: () => void }) {
                 <span className="indicator-name" title={meta.description}>
                   {meta.name}
                 </span>
+                {spec.kind === 'pine' && (
+                  <button
+                    className="ghost"
+                    title="Edit in the Pine tab"
+                    aria-label={`Edit ${meta.name} source`}
+                    onClick={() => openPineEditor(spec.id)}
+                  >
+                    Edit
+                  </button>
+                )}
                 <button
                   className="ghost icon"
                   title={spec.visible ? 'Hide' : 'Show'}
@@ -182,20 +190,16 @@ export function Sidebar({ onImportCsv }: { onImportCsv: () => void }) {
                   ))}
                 </div>
               )}
-              {spec.kind === 'pine' && (
-                <PineEntry
-                  source={spec.source ?? ''}
-                  overrides={spec.inputs ?? {}}
-                  run={pineRuns[spec.id]}
-                  onSource={(source) => updateIndicator(spec.id, { source })}
-                  onInput={(name, v) => updateIndicator(spec.id, { inputs: { [name]: v } })}
-                />
-              )}
             </div>
           );
         })}
 
-        <AddIndicator onAdd={addIndicator} />
+        <AddIndicator
+          onAdd={(kind) => {
+            const id = addIndicator(kind);
+            if (kind === 'pine') openPineEditor(id);
+          }}
+        />
       </section>
     </aside>
   );
@@ -227,84 +231,4 @@ function AddIndicator({ onAdd }: { onAdd: (kind: IndicatorKind) => void }) {
       </select>
     </div>
   );
-}
-
-function PineEntry({
-  source,
-  overrides,
-  run,
-  onSource,
-  onInput,
-}: {
-  source: string;
-  overrides: Record<string, PineInputValue>;
-  run: PineRunState | undefined;
-  onSource: (source: string) => void;
-  onInput: (name: string, v: PineInputValue) => void;
-}) {
-  const error = run?.error;
-  const inputs = run?.result?.inputs ?? [];
-  return (
-    <div className="pine-entry">
-      <PineEditor value={source} onChange={onSource} error={error} ariaLabel="Pine source" minHeight={140} />
-      {run?.running && <div className="muted-2" style={{ fontSize: 11.5 }}>Running…</div>}
-      {error && (
-        <div className="pine-error" role="alert" style={{ color: 'var(--neg, #ef4444)', fontSize: 11.5, whiteSpace: 'pre-wrap' }}>
-          {error.line !== undefined ? `Line ${error.line}: ` : ''}
-          {error.message}
-        </div>
-      )}
-      {inputs.length > 0 && (
-        <div className="indicator-params">
-          {inputs.map((inp) => (
-            <label className="param-field" key={inp.name}>
-              {inp.name}
-              <PineInputField input={inp} value={overrides[inp.name] ?? inp.defval} onChange={(v) => onInput(inp.name, v)} />
-            </label>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PineInputField({
-  input,
-  value,
-  onChange,
-}: {
-  input: PineInput;
-  value: PineInputValue | null;
-  onChange: (v: PineInputValue) => void;
-}) {
-  if (input.options && input.options.length > 0) {
-    return (
-      <select value={String(value ?? '')} onChange={(ev) => onChange(input.options!.find((o) => String(o) === ev.target.value) ?? ev.target.value)}>
-        {input.options.map((o) => (
-          <option key={String(o)} value={String(o)}>
-            {String(o)}
-          </option>
-        ))}
-      </select>
-    );
-  }
-  if (input.type === 'bool') {
-    return <input type="checkbox" checked={Boolean(value)} onChange={(ev) => onChange(ev.target.checked)} />;
-  }
-  if (input.type === 'int' || input.type === 'float') {
-    return (
-      <input
-        type="number"
-        value={typeof value === 'number' ? value : ''}
-        min={input.minval}
-        max={input.maxval}
-        step={input.step ?? (input.type === 'int' ? 1 : 0.1)}
-        onChange={(ev) => {
-          const v = Number(ev.target.value);
-          if (ev.target.value !== '' && Number.isFinite(v)) onChange(v);
-        }}
-      />
-    );
-  }
-  return <input type="text" value={String(value ?? '')} onChange={(ev) => onChange(ev.target.value)} />;
 }
