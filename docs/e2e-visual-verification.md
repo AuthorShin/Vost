@@ -13,6 +13,8 @@ npm run -s e2e:capture -- chart-reset           # docs/evidence/chart-reset/{fre
 npm run -s e2e:capture -- chart-range          # docs/evidence/chart-range/chart-range-{before,applied,refused,fetched,cleared}-{desktop,narrow}.png
 npm run -s e2e:capture -- bt-range              # docs/evidence/bt-range/bt-range-{no-range,range,from-after-to}-{desktop,narrow}.png
 npm run -s e2e:capture -- conn-status           # docs/evidence/conn-status/conn-status-{closed,open}-{desktop,narrow}.png (stubbed /api/status)
+npm run -s e2e:capture -- network-audit         # docs/evidence/network-audit/network-audit-{provider-<id>,timeframe,search,watchlist,live,status}-desktop.png + network-audit-requests-desktop.txt
+npm run -s e2e:capture -- outage                # docs/evidence/outage/outage.webm (+ .gif) and outage-{live,outage,recovered}-desktop.png
 npm run -s e2e:capture -- zone-clock            # docs/evidence/zone-clock/zone-clock-{clock,list,filtered,tehran}-{desktop,narrow}.png
 npm run -s e2e:capture -- pine-tab             # docs/evidence/pine-tab/pine-tab-{sidebar-edit,editor,error,collapsed-edit,empty}-{desktop,narrow}.png
 npm run -s e2e:capture -- chart --slug my-fix   # everything goes to docs/evidence/my-fix/
@@ -22,7 +24,7 @@ Usage: `npm run e2e:capture -- <scenario> [<scenario>...] [--slug <slug>]`. Use 
 the command then prints one path per written file and nothing else, and exits 0.
 An unknown or missing scenario exits non-zero and lists the known names.
 
-What it does: builds the client, starts `server/index.mjs` on a free port bound to 127.0.0.1, waits for
+What it does: builds the client, starts the fake market-data service (see "Fake market data" below), then `server/index.mjs` on a free port bound to 127.0.0.1, waits for
 `/api/health`, runs each scenario in headless Chromium, then stops the browser and the server. A failing
 step exits non-zero within about 15 s with `e2e:capture: scenario "<name>" step "<step>" failed: <reason>`.
 
@@ -35,11 +37,33 @@ predates the Chromium image change (rebuild it) or, outside it, that the system 
 `--with-deps` install above). `Executable doesn't exist` means the browser download is missing
 (`npx playwright install chromium`).
 
-## Demo data, offline
+## Fake market data, offline
 
-Every capture runs offline on the Demo provider. Each scenario starts with `localStorage` seeded
-(`vost.prefs.v1` = `{ "providerId": "demo", "symbol": "DEMO", "timeframe": "1d" }`), and the browser aborts any
-request whose host is not the local server, so captures are deterministic and need no network.
+Most captures run on the Demo provider. Each scenario starts with `localStorage` seeded
+(`vost.prefs.v1` = `{ "providerId": "demo", "symbol": "DEMO", "timeframe": "1d" }`).
+
+The remote providers are served by a fake market-data service in `e2e/fake-upstream/`. `npm run e2e:capture` always
+starts it before the server and passes the server `VOST_TEST_UPSTREAM=http://127.0.0.1:<port>`, so a capture never
+reaches the real network from the server either. With that setting the server rewrites every outbound REST and
+websocket URL to the fake, keeping the original scheme and host in the path:
+`https://api.binance.com/api/v3/klines?x` becomes `http://127.0.0.1:<port>/https/api.binance.com/api/v3/klines?x`
+and `wss://stream.binance.com:9443/ws/a` becomes `ws://127.0.0.1:<port>/wss/stream.binance.com:9443/ws/a`
+(`server/testUpstream.ts`). Unset, URLs are untouched, which is the production path.
+
+- The fake answers in each provider's real format: history, symbols and search for all 7 providers (Binance on both
+  hosts, Coinbase, Kraken, Bybit, OKX, Yahoo, Stooq) and a new live kline at least every second (a changing close) on
+  the four live feeds, including their subscribe and ping messages. It records every request it served.
+- `stop()` closes the listener and terminates every open socket, so new connects are refused; `start()` listens again
+  on the same port. A scenario reaches both through `ctx.upstream` (see `outage`).
+- The setting is for tests only. With `NODE_ENV=production` (the Docker image sets it) the server prints an error naming
+  `VOST_TEST_UPSTREAM` and exits non-zero before it listens, and it refuses any value that is not an `http://` loopback URL.
+- `e2e/fake-upstream/fake-upstream.test.ts` (in `npm test`) runs every real adapter and live feed against the fake,
+  including `stop()` and `start()`.
+
+The browser may only reach the Vost server. The runner aborts every other request (http(s) and websocket; `data:` and
+`blob:` excepted), and **any aborted request fails the scenario**, listing the URLs. `network-audit` walks every remote
+provider in the UI and writes every URL the browser requested, with counts, to `network-audit-requests-desktop.txt`;
+`outage` stops the fake while live data is on and shows the app recovering without a reload.
 
 ## Add a scenario
 
@@ -62,8 +86,9 @@ export const myScenario: Scenario = {
 };
 ```
 
-`ctx` gives `page`, `step(label, fn)` (wraps failures with the scenario and step name), `screenshot(name?)` and
-`waitForChart()`. Keep the scripts to erasable TypeScript syntax (Node runs them with type stripping). Check types
+`ctx` gives `page`, `step(label, fn)` (wraps failures with the scenario and step name), `screenshot(name?)`,
+`waitForChart()`, `upstream` (`stop()` / `start()` of the fake market data), `requests` (every URL the browser asked
+for) and `writeText(name, text)` (writes `<scenario>-<name>-<viewport>.txt`). Keep the scripts to erasable TypeScript syntax (Node runs them with type stripping). Check types
 with `npx tsc -p e2e` (not part of the typecheck gate).
 
 ## Use captures in a PR

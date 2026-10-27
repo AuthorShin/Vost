@@ -13,6 +13,10 @@
  *   HOST  (default 0.0.0.0)
  *   VOST_STATUS_INTERVAL  seconds between background health checks of the
  *                         exchanges (default 60; 0 turns them off)
+ *   VOST_TEST_UPSTREAM  test only: http://127.0.0.1:<port> of a fake market-data
+ *                       service that every outbound call is rewritten to (see
+ *                       docs/e2e-visual-verification.md). Refused when
+ *                       NODE_ENV=production or when it is not a loopback URL.
  */
 import http from 'node:http';
 import { createReadStream } from 'node:fs';
@@ -25,6 +29,14 @@ import { handleLive } from './live/route.ts';
 import { sendJson } from './respond.ts';
 import { handleStatus } from './status/route.ts';
 import { createStatusService } from './status/scheduler.ts';
+import { readTestUpstream, setTestUpstream } from './testUpstream.ts';
+
+try {
+  setTestUpstream(readTestUpstream(process.env));
+} catch (err) {
+  console.error(`Vost: ${err instanceof Error ? err.message : String(err)}`);
+  process.exit(1);
+}
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const DIST = path.join(ROOT, 'client', 'dist');

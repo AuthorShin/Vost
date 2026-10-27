@@ -4,6 +4,7 @@
  * over-specific ones), retries rate limits and transient 5xx, times out, and
  * turns every failure into an `UpstreamError`.
  */
+import { upstreamUrl } from '../testUpstream.ts';
 import { UpstreamError } from './errors.ts';
 
 export type FetchFn = typeof globalThis.fetch;
@@ -58,7 +59,7 @@ async function request<T>(provider: string, url: string, ctx: UpstreamContext, r
     for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
       const delay = RETRY_DELAYS_MS[attempt];
       if (delay > 0) await sleep(delay, signal);
-      const res = await doFetch(url, {
+      const res = await doFetch(upstreamUrl(url), {
         signal,
         redirect: 'follow',
         headers: {
