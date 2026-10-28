@@ -28,6 +28,8 @@ import { fmtTime } from '../lib/format';
 import { browserTimeZone, isValidTimeZone } from '../lib/time';
 import { CHART_MIN_BARS, chartRangeErrorText, cropToChartRange, describeTimeRange, sanitizeTimeRange, sliceByTimeRange, timeRangeErrorText, type TimeRange } from '../lib/timeRange';
 import * as wl from '../lib/watchlist';
+import { DOCK_DEFAULT, SIDEBAR_DEFAULT, sanitizeStoredSize } from '../lib/paneSizes';
+import { nextPineSelection } from '../lib/pineSelection';
 import type { WorkerRequestBody, WorkerResponse } from '../lib/workers/backtest.worker';
 
 export interface Toast {
@@ -40,6 +42,8 @@ function toastSource(text: string): string {
   if (/backtest|optimiz|parameter/i.test(text)) return 'Backtest';
   return 'Data';
 }
+
+export type DockTab = 'backtest' | 'pine' | 'optimizer' | 'results';
 
 /** Latest Pine run of one indicator entry. `result` is kept while a newer run is in flight. */
 export interface PineRunState {
@@ -62,6 +66,8 @@ interface Prefs {
   showTrades: boolean;
   timeZone?: string;
   btRange?: TimeRange;
+  sidebarWidth?: number;
+  dockHeight?: number;
 }
 
 const PREFS_KEY = 'prefs.v1';
@@ -93,6 +99,13 @@ export interface AppState {
   timeZone: string;
   /** Pine run state by indicator id (not persisted). */
   pineRuns: Record<string, PineRunState>;
+  /** Bottom dock UI state (not persisted). */
+  dockTab: DockTab;
+  dockCollapsed: boolean;
+  /** Pane sizes in px as the user last set them (persisted); the layout clamps them to the viewport. */
+  sidebarWidth: number;
+  dockHeight: number;
+  selectedPineId: string | null;
 
   /* market data */
   candles: Candle[];
@@ -179,8 +192,16 @@ export interface AppState {
   saveCurrentDataset(name?: string): void;
   activateDataset(id: string): void;
   removeDataset(id: string): void;
-  addIndicator(kind: IndicatorKind): void;
+  /** Adds an indicator and returns its id. */
+  addIndicator(kind: IndicatorKind): string;
   removeIndicator(id: string): void;
+  setDockTab(tab: DockTab): void;
+  setDockCollapsed(collapsed: boolean): void;
+  setSidebarWidth(px: number): void;
+  /** Sets the expanded dock height; the collapsed state is untouched. */
+  setDockHeight(px: number): void;
+  /** Opens the bottom dock on the Pine tab with this indicator selected. */
+  openPineEditor(id: string): void;
   updateIndicator(id: string, patch: Partial<Pick<IndicatorSpec, 'params' | 'color' | 'visible' | 'source'>> & { inputs?: Record<string, PineInputValue> }): void;
   setShowTrades(v: boolean): void;
   setTimeZone(tz: string): void;
@@ -311,6 +332,8 @@ export const useStore = create<AppState>()((set, get) => {
       showTrades: s.showTrades,
       timeZone: s.timeZone,
       btRange: s.btRange,
+      sidebarWidth: s.sidebarWidth,
+      dockHeight: s.dockHeight,
     } satisfies Prefs);
   }, 400);
 
@@ -422,6 +445,11 @@ export const useStore = create<AppState>()((set, get) => {
     ...defaultPrefs,
     timeZone: browserTimeZone(),
     pineRuns: {},
+    dockTab: 'backtest',
+    dockCollapsed: false,
+    sidebarWidth: SIDEBAR_DEFAULT,
+    dockHeight: DOCK_DEFAULT,
+    selectedPineId: null,
     candles: [],
     dataKey: '',
     chartRange: null,
@@ -503,6 +531,8 @@ export const useStore = create<AppState>()((set, get) => {
         showTrades: prefs.showTrades ?? true,
         timeZone: isValidTimeZone(prefs.timeZone) ? prefs.timeZone : browserTimeZone(),
         btRange: sanitizeTimeRange(prefs.btRange),
+        sidebarWidth: sanitizeStoredSize(prefs.sidebarWidth, SIDEBAR_DEFAULT),
+        dockHeight: sanitizeStoredSize(prefs.dockHeight, DOCK_DEFAULT),
         datasets: Array.isArray(datasets) ? datasets : [],
         optConfig: defaultOptimizeConfig({ ...defaultPrefs.btConfig, ...(prefs.btConfig ?? {}) }),
       });
@@ -643,13 +673,41 @@ export const useStore = create<AppState>()((set, get) => {
       const indicators = [...get().indicators, defaultIndicator(kind)];
       set({ indicators });
       persistPrefs();
-      if (kind === 'pine') schedulePine(indicators[indicators.length - 1].id);
+      const id = indicators[indicators.length - 1].id;
+      if (kind === 'pine') schedulePine(id);
+      return id;
     },
 
     removeIndicator(id) {
-      set({ indicators: get().indicators.filter((i) => i.id !== id) });
+      const before = get().indicators;
+      set({
+        indicators: before.filter((i) => i.id !== id),
+        selectedPineId: nextPineSelection(before, get().selectedPineId, id),
+      });
       setPineRun(id, null);
       persistPrefs();
+    },
+
+    setDockTab(tab) {
+      set({ dockTab: tab, dockCollapsed: false });
+    },
+
+    setDockCollapsed(collapsed) {
+      set({ dockCollapsed: collapsed });
+    },
+
+    setSidebarWidth(px) {
+      set({ sidebarWidth: sanitizeStoredSize(px, SIDEBAR_DEFAULT) });
+      persistPrefs();
+    },
+
+    setDockHeight(px) {
+      set({ dockHeight: sanitizeStoredSize(px, DOCK_DEFAULT) });
+      persistPrefs();
+    },
+
+    openPineEditor(id) {
+      set({ dockTab: 'pine', selectedPineId: id, dockCollapsed: false });
     },
 
     updateIndicator(id, patch) {

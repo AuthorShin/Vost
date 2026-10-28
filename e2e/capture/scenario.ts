@@ -1,6 +1,7 @@
-import { mkdir, rename } from 'node:fs/promises';
+import { mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Browser, BrowserContext, Page } from 'playwright';
+import type { FakeUpstream } from '../fake-upstream/index.ts';
 
 export type ViewportName = 'desktop' | 'narrow';
 
@@ -21,6 +22,12 @@ export interface ScenarioContext {
   screenshot(name?: string): Promise<string>;
   /** Waits for the chart canvas, the demo legend title and the web fonts. */
   waitForChart(): Promise<void>;
+  /** The fake market-data service the server is pointed at; `stop()` and `start()` take it down and bring it back. */
+  upstream: Pick<FakeUpstream, 'stop' | 'start'>;
+  /** Every URL the browser requested so far (http, https, ws and wss; not data: or blob:), in order, repeats included. */
+  requests: readonly string[];
+  /** Writes `<scenario>-<name>-<viewport>.txt` and returns its path. */
+  writeText(name: string, text: string): Promise<string>;
 }
 
 export interface Scenario {
@@ -40,11 +47,12 @@ export interface RunOptions {
   outDir: string;
   scenario: Scenario;
   viewport: ViewportName;
+  upstream: FakeUpstream;
 }
 
 /** Runs one scenario at one viewport in a fresh context; returns the files written. */
 export async function runScenario(opts: RunOptions): Promise<string[]> {
-  const { browser, baseUrl, outDir, scenario, viewport } = opts;
+  const { browser, baseUrl, outDir, scenario, viewport, upstream } = opts;
   await mkdir(outDir, { recursive: true });
   const size = VIEWPORTS[viewport];
   const recording = scenario.video === true;
@@ -58,12 +66,27 @@ export async function runScenario(opts: RunOptions): Promise<string[]> {
   context.setDefaultNavigationTimeout(ACTION_TIMEOUT_MS);
   const origin = new URL(baseUrl).host;
   const aborted: string[] = [];
-  // A capture must never depend on the network: only the local server is reachable.
+  const requests: string[] = [];
+  const isLocal = (url: URL): boolean => url.host === origin;
+  // A capture must never depend on the network: only the local server is reachable, and anything else fails the run.
   await context.route('**/*', (route) => {
     const url = new URL(route.request().url());
-    if (url.host === origin || url.protocol === 'data:' || url.protocol === 'blob:') return route.continue();
+    if (url.protocol === 'data:' || url.protocol === 'blob:') return route.continue();
+    requests.push(url.href);
+    if (isLocal(url)) return route.continue();
     aborted.push(url.href);
     return route.abort();
+  });
+  // Routes above see HTTP only: a browser websocket to another host is caught here.
+  await context.routeWebSocket(/.*/, (ws) => {
+    const url = new URL(ws.url());
+    requests.push(url.href);
+    if (isLocal(url)) {
+      ws.connectToServer();
+      return;
+    }
+    aborted.push(url.href);
+    void ws.close();
   });
   await context.addInitScript(() => {
     localStorage.setItem(
@@ -92,6 +115,14 @@ export async function runScenario(opts: RunOptions): Promise<string[]> {
       written.push(file);
       return file;
     },
+    upstream,
+    requests,
+    async writeText(name, text) {
+      const file = path.join(outDir, `${[scenario.name, name, viewport].join('-')}.txt`);
+      await writeFile(file, text);
+      written.push(file);
+      return file;
+    },
     async waitForChart() {
       await step('wait for chart', async () => {
         await page.locator('.chart-container canvas').first().waitFor({ state: 'visible' });
@@ -105,10 +136,14 @@ export async function runScenario(opts: RunOptions): Promise<string[]> {
   try {
     await scenario.run(ctx);
   } catch (err) {
-    if (aborted.length) console.error(`e2e:capture: aborted non-local requests: ${aborted.join(', ')}`);
+    if (aborted.length) console.error(`e2e:capture: aborted non-local requests: ${[...new Set(aborted)].join(', ')}`);
     throw err;
   } finally {
     await context.close();
+  }
+  if (aborted.length) {
+    const urls = [...new Set(aborted)];
+    throw new StepError(`scenario "${scenario.name}" failed: the browser requested ${urls.length} URL(s) outside the Vost server: ${urls.join(', ')}`);
   }
   if (video) {
     const dest = path.join(outDir, `${scenario.name}.webm`);

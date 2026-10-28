@@ -1,48 +1,108 @@
-import { useState } from 'react';
-import { useStore } from '../state/store';
+import { useEffect, useRef } from 'react';
+import { DOCK_DEFAULT, DOCK_MIN, clamp, dockLimits, resolveDockResize } from '../lib/paneSizes';
+import { useViewportSize } from '../lib/useViewportSize';
+import { useStore, type DockTab } from '../state/store';
+import { Splitter } from './Splitter';
 import { BacktestTab } from './BacktestTab';
+import { PineTab } from './PineTab';
 import { OptimizerTab } from './OptimizerTab';
 import { ResultsTab } from './ResultsTab';
 import { ZoneClock } from './ZoneClock';
 
-type Tab = 'backtest' | 'optimizer' | 'results';
-
 export function BottomDock() {
-  const [tab, setTab] = useState<Tab>('backtest');
-  const [collapsed, setCollapsed] = useState(false);
+  const tab = useStore((s) => s.dockTab);
+  const collapsed = useStore((s) => s.dockCollapsed);
+  const setDockTab = useStore((s) => s.setDockTab);
+  const setDockCollapsed = useStore((s) => s.setDockCollapsed);
+  const pineCount = useStore((s) => s.indicators.filter((i) => i.kind === 'pine').length);
+  const pineRunning = useStore((s) => Object.values(s.pineRuns).some((r) => r.running));
   const btResult = useStore((s) => s.btResult);
   const btRunning = useStore((s) => s.btRunning);
   const optResult = useStore((s) => s.optResult);
 
-  const select = (t: Tab) => {
-    setTab(t);
-    setCollapsed(false);
+  const dockHeight = useStore((s) => s.dockHeight);
+  const setDockHeight = useStore((s) => s.setDockHeight);
+  const viewport = useViewportSize();
+  const limits = dockLimits(viewport.height);
+  const effective = clamp(dockHeight, limits.min, limits.max);
+
+  // The height the current drag started from, so collapsing by drag keeps the last expanded height.
+  const dragStartHeight = useRef(dockHeight);
+
+  const onResize = (raw: number, via: 'drag' | 'key') => {
+    const r = resolveDockResize(raw, via, collapsed, dragStartHeight.current, limits);
+    if (r.height !== null) setDockHeight(r.height);
+    if (r.collapsed !== collapsed) setDockCollapsed(r.collapsed);
   };
 
+  // Keep the selected tab inside the scrolling tab strip.
+  const tablistRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const list = tablistRef.current;
+    const el = list?.querySelector<HTMLElement>(`#dock-tab-${tab}`);
+    if (!list || !el) return;
+    const left = el.offsetLeft - list.offsetLeft;
+    if (left < list.scrollLeft) list.scrollLeft = left;
+    else if (left + el.offsetWidth > list.scrollLeft + list.clientWidth) list.scrollLeft = left + el.offsetWidth - list.clientWidth;
+  }, [tab, collapsed]);
+
+  const select = (t: DockTab) => setDockTab(t);
+  const tabProps = (t: DockTab) => ({
+    role: 'tab' as const,
+    id: `dock-tab-${t}`,
+    'aria-selected': tab === t && !collapsed,
+    'aria-controls': 'dock-panel',
+    className: `dock-tab${tab === t && !collapsed ? ' active' : ''}`,
+    onClick: () => select(t),
+  });
+
   return (
-    <section className={`dock${collapsed ? ' collapsed' : ''}`}>
+    <section className={`dock${collapsed ? ' collapsed' : ''}`} style={{ ['--dock-height' as string]: `${effective}px` }}>
+      <Splitter
+        orientation="horizontal"
+        label="Resize bottom panel"
+        value={collapsed ? DOCK_MIN : effective}
+        min={limits.min}
+        max={limits.max}
+        onChange={onResize}
+        onDragStart={() => {
+          dragStartHeight.current = effective;
+        }}
+        onReset={() => {
+          setDockHeight(DOCK_DEFAULT);
+          setDockCollapsed(false);
+        }}
+      />
       <div className="dock-tabs">
-        <button className={`dock-tab${tab === 'backtest' && !collapsed ? ' active' : ''}`} onClick={() => select('backtest')}>
-          <span>⚙</span> Backtest
-          {btRunning && <span className="spinner" />}
-        </button>
-        <button className={`dock-tab${tab === 'optimizer' && !collapsed ? ' active' : ''}`} onClick={() => select('optimizer')}>
-          <span>⛭</span> Optimizer
-          {optResult && <span className="badge">{optResult.combos}</span>}
-        </button>
-        <button className={`dock-tab${tab === 'results' && !collapsed ? ' active' : ''}`} onClick={() => select('results')}>
-          <span>📊</span> Results
-          {btResult && <span className="badge blue">{btResult.trades.length} trades</span>}
-        </button>
+        <div className="dock-tablist" role="tablist" aria-label="Dock" ref={tablistRef}>
+          <button {...tabProps('backtest')}>
+            <span>⚙</span> <span className="dock-tab-label">Backtest</span>
+            {btRunning && <span className="spinner" />}
+          </button>
+          <button {...tabProps('pine')}>
+            <span>{'{ }'}</span> <span className="dock-tab-label">Pine</span>
+            {pineRunning && <span className="spinner" />}
+            {pineCount > 0 && <span className="badge">{pineCount}</span>}
+          </button>
+          <button {...tabProps('optimizer')}>
+            <span>⛭</span> <span className="dock-tab-label">Optimizer</span>
+            {optResult && <span className="badge">{optResult.combos}</span>}
+          </button>
+          <button {...tabProps('results')}>
+            <span>📊</span> <span className="dock-tab-label">Results</span>
+            {btResult && <span className="badge blue">{btResult.trades.length} trades</span>}
+          </button>
+        </div>
         <div className="dock-spacer" />
         <ZoneClock />
-        <button className="ghost icon" title={collapsed ? 'Expand' : 'Collapse'} onClick={() => setCollapsed((v) => !v)}>
+        <button className="ghost icon" title={collapsed ? 'Expand' : 'Collapse'} onClick={() => setDockCollapsed(!collapsed)}>
           {collapsed ? '▲' : '▼'}
         </button>
       </div>
       {!collapsed && (
-        <div className="dock-body">
+        <div className={`dock-body${tab === 'pine' ? ' pine' : ''}`} role="tabpanel" id="dock-panel" aria-labelledby={`dock-tab-${tab}`}>
           {tab === 'backtest' && <BacktestTab />}
+          {tab === 'pine' && <PineTab />}
           {tab === 'optimizer' && <OptimizerTab />}
           {tab === 'results' && <ResultsTab />}
         </div>
