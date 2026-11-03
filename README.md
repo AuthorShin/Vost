@@ -14,13 +14,15 @@ Pull free public market data, import your own CSV files, chart them with [lightw
 
 </div>
 
+**New to Vost? Read the [user guide](docs/guide/README.md)** - one page per feature, with screenshots.
+
 ---
 
 ## Why Vost?
 
 | | |
 |---|---|
-| 🔑 **No accounts, no keys, no quotas** | Data comes from free public APIs (Binance, Yahoo Finance, Stooq) or your own files. Nothing is metered, nothing phones home. |
+| 🔑 **No accounts, no keys, no quotas** | Data comes from free public APIs (Binance, Yahoo Finance) or your own files. Nothing is metered, nothing phones home. |
 | 📴 **Works completely offline** | Import an OHLCV CSV → chart it → backtest it. Parsing, storing and computing all happen **in your browser**. Airplane-mode friendly. |
 | ♾️ **Unlimited backtests** | No "upgrade to run more". The engine runs client-side in a Web Worker; even 100k-bar datasets and thousands-of-combinations grid searches are just local CPU. |
 | 🏠 **Self-hosted in one command** | `docker compose up` or `npm start`. A single Node process serves the app and its market-data API. |
@@ -29,27 +31,35 @@ Pull free public market data, import your own CSV files, chart them with [lightw
 
 ## Feature tour
 
-**Charting**
+Each area below has a page in the [user guide](docs/guide/README.md).
+
+**Charting** ([guide](docs/guide/charts.md))
 - Candlestick chart with volume, powered by TradingView's open-source *lightweight-charts* (v5, panes supported)
 - Indicators: SMA, EMA, Bollinger Bands, VWAP, Volume, RSI, MACD — configurable periods & colors, live editing
-- Crosshair legend with OHLC + change + volume, fit-to-screen, PNG screenshot, CSV export
+- Coloured crosshair legend (label, OHLC, change, volume), a bar under the chart with quick ranges (1D to All), the Range picker and the time-zone clock, fit-to-screen, PNG screenshot, CSV export
+- Bar replay: pick a starting bar (click it or type a date, and pick a new one at any time during replay), then step or play forward at 1, 3 or 10 bars a second with no look-ahead in the chart, indicators, Pine output or trade markers; backtests still use all the data and live bars keep arriving in the background ([guide](docs/guide/replay.md))
+- Layouts ([guide](docs/guide/layouts.md)): 1 to 16 charts in 55 arrangements with one active chart, **Sync in layout** switches (symbol, interval, crosshair, time, date range) and named layouts you can save (Ctrl/Cmd+S), autosave, copy, rename and reopen
+- Custom intervals ([guide](docs/guide/timeframes.md)): any number-and-unit timeframe such as 2h, 10m or 3M from **Add interval...** in the timeframe picker
+- Drawings ([guide](docs/guide/drawings.md)): trend line, horizontal line, ray, rectangle, Fibonacci, text notes, measure and magnet, saved per symbol, each with its own style and a settings dialog
+- Price alerts ([guide](docs/guide/alerts.md)): the server watches prices around the clock and can message you on Telegram
+- Watchlist ([guide](docs/guide/watchlist.md)): lists, sections, tags and live quotes
+- Pine Script ([guide](docs/guide/pine.md)): Pine v5 and v6 indicators and strategies, an editor pane, old-script conversion, TradingView libraries and a side-by-side compare page
 - Live streaming candles (the server keeps one exchange websocket per feed, shared by all tabs, with auto-reconnect and a Binance fallback host)
 - Connection health light in the top bar: whether each exchange's price history, symbol lookup and live stream is working right now, with a "Test now" button (the server checks about once a minute; `VOST_STATUS_INTERVAL=0` turns that off)
 
-**Data**
+**Data** ([guide](docs/guide/data.md))
 - **Binance** — free public crypto klines + realtime websocket, no key
 - **Yahoo Finance** — stocks, ETFs, indices, forex, crypto (delayed), no key
-- **Stooq** — free historical stocks/indices/FX/crypto CSV downloads, no key
 - **Demo** — deterministic synthetic candles, fully offline
 - **CSV import** — auto-detects delimiter, header, column roles, and ~8 timestamp formats (see [CSV support](#csv-import--the-offline-workflow))
 - Local library: imported datasets persist in browser storage; chart & backtest with the network off
 
-**Backtesting**
+**Backtesting** ([guide](docs/guide/backtesting.md))
 - Built-in strategies: SMA/EMA crossover, MACD, RSI mean-reversion, Bollinger (breakout & reversion), Donchian breakout, Buy & hold — plus **custom JavaScript strategies**
 - Engine: single position, next-bar-open fills, bps fees & slippage per side, intrabar stops/takes (stop-first conservative assumption, gap-through fills), shorts optional
 - Results: 20+ metrics (CAGR, Sharpe, Sortino, Calmar, max drawdown & duration, profit factor, exposure, expectancy…), equity + underwater chart, full trade log, CSV exports, trade markers drawn on the chart
 - Time range: the backtester and the optimizer run on the From / To range set in the Backtest pane (default: all loaded data)
-- **Optimizer**: grid-search one or two parameters, ranked by any metric, with a clickable heatmap — apply the best combo and re-run in one click
+- **Optimizer**: grid-search any number of parameters, ranked by any metric, with a clickable heatmap and a Cancel button — apply the best combo and re-run in one click
 
 ## Quick start
 
@@ -89,18 +99,21 @@ npm run -s e2e:capture -- chart  # screenshots/video into docs/evidence (see doc
 | Provider | Coverage | Key needed | Live | Notes |
 |---|---|---|---|---|
 | **Binance** | Crypto (1000+ pairs) | No | ✅ | Public REST + websocket. Falls back to `data-api.binance.vision` when the main host is region-blocked. |
-| **Coinbase** | Crypto spot | No | — | Public REST candles (300 per request). The public feed has no candle channel, so no live streaming. |
-| **Kraken** | Crypto spot | No | ✅ | Public REST + websocket v2. History is limited to the latest 720 candles per timeframe. |
+| **Coinbase** | Crypto spot | No | Yes (built from trades) | Public REST candles (300 per request). The public feed has no candle channel, so the server builds live candles from its trade stream, starting each bar from Coinbase's own candle. 30m, 4h, 1w and 1M are built from lower timeframes (marked `*` in the picker) and stream live too. |
+| **Kraken** | Crypto spot | No | ✅ | Public REST + websocket v2. History is limited to the latest 720 candles per timeframe. 1M is built from daily candles (marked `*`) and streams live too. |
 | **Bybit** | Crypto spot | No | ✅ | Public v5 REST (1000 per request) + websocket. |
 | **OKX** | Crypto spot | No | ✅ | Public v5 history candles (100 per request) + websocket. |
-| **Yahoo Finance** | Stocks, ETFs, indices, FX, crypto | No | — | Public chart API (delayed). Intraday history limits apply (1m ≈ 7 days, 1h ≈ 2 years). |
-| **Stooq** | Stocks, indices, FX, crypto | No | — | Daily/weekly/monthly CSV downloads. Some cloud/VPS IPs are challenged by Stooq's bot protection — Yahoo or CSV import are good fallbacks there. |
+| **Hyperliquid Perps** | Crypto perpetuals | No | ✅ | Public info API (POST) + websocket. Only the latest 5000 candles per timeframe are kept. |
+| **Hyperliquid Spot** | Crypto spot | No | ✅ | Same API; pairs are written `HYPE/USDC`. Only the latest 5000 candles per timeframe are kept. |
+| **Yahoo Finance** | Stocks, ETFs, indices, FX, crypto | No | — | Public chart API (delayed). Intraday history limits apply (1m ≈ 7 days, 1h ≈ 2 years). 4h is built from 1h on the exchange's session calendar (marked `*`). |
 | **Demo (offline)** | Synthetic | No | — | Deterministic random walk — try the whole app with zero network. |
 | **CSV import** | Anything you have | No | — | Fully offline workflow. See below. |
 
+The **Build** toggle next to the timeframe picker (remembered, off by default) builds every timeframe above the provider's lowest from the next lower native one instead of using the exchange's own bars; see [docs/DATA-SOURCES.md](docs/DATA-SOURCES.md). To chart any other interval (such as 2h, 10m, 3d, 2w or 3M), pick **Add interval...** at the end of the timeframe picker: the interval is built from the best lower timeframe the provider has, kept in your browser, and can be removed from the same dialog.
+
 For a full comparison of these and candidate providers (limits, CORS, keys, terms), see [docs/DATA-SOURCES.md](docs/DATA-SOURCES.md).
 
-The Vost server fetches all remote market data for the browser (`/api/history`, `/api/search`, `/api/symbols`, `/api/providers`) and only talks to a fixed set of providers. About once a minute it also makes a small test request to each provider's history, symbol-search and live feeds (about 17 checks, spread out, with the full symbol lists only every 10th round) to power the connection health light at `/api/status`; set `VOST_STATUS_INTERVAL=0` to switch that off. Your browser never calls those third parties for history or symbol search. Live candles also come from the server: it keeps one websocket per exchange feed, shared by every open tab, and streams the updates to the browser over a same-origin `/api/live` event stream, so the browser talks to no exchange at all. A static-only deployment (no Node server) supports only CSV import and Demo.
+The Vost server fetches all remote market data for the browser (`/api/history`, `/api/search`, `/api/symbols`, `/api/providers`) and only talks to a fixed set of providers (and, to look up the TradingView libraries a Pine script imports, to `www.tradingview.com` and `pine-facade.tradingview.com`). About once a minute it also makes a small test request to each provider's history, symbol-search and live feeds (about 17 checks, spread out, with the full symbol lists only every 10th round) to power the connection health light at `/api/status`; set `VOST_STATUS_INTERVAL=0` to switch that off. Your browser never calls those third parties for history or symbol search. Live candles also come from the server: it keeps one websocket per exchange feed, shared by every open tab, and streams the updates to the browser over one same-origin `/api/live` event stream per tab, shared by all its charts, so the browser talks to no exchange at all. It also records a list of markets around the clock (BTC and ETH on Binance, Coinbase and Hyperliquid by default, up to 20000 bars on every timeframe), keeping their live connections open and their history on disk. The server also keeps your price alerts in a small file and watches prices for them around the clock, so an alert fires once when the price crosses its level even with every browser tab closed. A static-only deployment (no Node server) supports only CSV import and Demo.
 
 > **Bring your own API:** add a server adapter in `server/providers/` and a catalog entry in `shared/providerCatalog.ts` — the UI picks it up automatically in the provider dropdown. See [CONTRIBUTING.md](CONTRIBUTING.md#adding-a-data-provider).
 
@@ -124,7 +137,7 @@ open examples/sample-daily.csv
 open examples/sample-mt5-format.csv
 ```
 
-Imported datasets live in your browser's local storage (Library section in the sidebar) and can be exported back to CSV at any time.
+Imported datasets live in your browser's local storage (Library section in the side panel) and can be exported back to CSV at any time.
 
 ## Backtesting
 
@@ -143,7 +156,7 @@ Signals are computed per bar from data **up to and including that bar**, then ex
 
 Risk controls: initial capital, position size (% of equity), fees (bps), slippage (bps), stop loss %, take profit %, long/short toggle.
 
-The **Optimizer** runs full backtests over a 1D or 2D parameter grid inside the same Web Worker (progress bar included), ranks results by any metric, and renders a heatmap. Click a cell → parameters applied → backtest re-run. The backtester and the optimizer both run on the time range set in the Backtest pane (empty = all loaded data).
+The **Optimizer** runs full backtests over a parameter grid of any number of parameters in a dedicated Web Worker (progress bar and Cancel included), ranks results by any metric, and renders a heatmap. Click a cell → parameters applied → backtest re-run. The backtester and the optimizer both run on the time range set in the Backtest pane (empty = all loaded data).
 
 Custom strategies are plain JavaScript with indicator helpers, executed in the worker:
 
@@ -176,19 +189,20 @@ Vost/
 │       │   ├── csv.ts         # dialect-tolerant CSV import engine
 │       │   ├── indicators.ts  # SMA/EMA/RSI/MACD/BB/ATR/VWAP…
 │       │   └── workers/       # backtest Web Worker
-│       └── state/             # zustand store (prefs, datasets, runs)
+│       └── state/             # app store (prefs, datasets, layout, saved layouts) + one chart store per chart (data, runs, live)
 ├── server/
 │   ├── index.mjs              # entry point: checks the Node version, then loads main.ts
 │   ├── main.ts                # zero-dep Node server: static files + the /api routes
 │   ├── api.ts                 # /api/providers, /history, /symbols, /search
+│   ├── alerts/                # /api/alerts: stored price alerts, watched around the clock
 │   ├── live/                  # /api/live: shared exchange websockets streamed to the browser
 │   └── providers/             # one REST adapter per data provider (Binance, Yahoo, …)
 ├── shared/                    # wire types and the provider catalog, used by server and client
 ├── examples/                  # ready-to-import sample CSVs
-└── docs/                      # strategy authoring & deployment guides
+└── docs/                      # user guide (docs/guide), strategy authoring & deployment guides
 ```
 
-- The **server** does two things: serve `client/dist` and answer the market-data API by calling the public provider APIs for the browser (many of them send no CORS headers), including the live candle stream. Its only state is in memory: the symbol-list cache and the open exchange websockets. It is TypeScript that Node runs directly (type stripping), with no build step and no npm dependency. No database.
+- The **server** does two things: serve `client/dist` and answer the market-data API by calling the public provider APIs for the browser (many of them send no CORS headers), including the live candle stream. Its state on disk is the price-alerts file (`alerts.json`), the Pine libraries it keeps for scripts that import them (`pine-libraries.json`: open-source TradingView libraries it fetched, and ones you pasted) and the candle store (`candles.sqlite`, a SQLite file written through Node's built-in `node:sqlite`), both in `VOST_DATA_DIR`; the candle store holds chart history for the markets the server records and is safe to delete (history is refetched from the exchange). The symbol-list cache and the open exchange websockets are in memory. It is TypeScript that Node runs directly (type stripping), with no build step and no npm dependency.
 - The **client** holds everything else: fetching, CSV parsing, indicator math, backtests (in a Web Worker), persistence (localStorage). This is what makes offline mode work.
 
 ### Configuration
@@ -197,15 +211,19 @@ Vost/
 |---|---|---|---|
 | `PORT` | server | `8787` | HTTP port |
 | `HOST` | server | `0.0.0.0` | Bind address (use `127.0.0.1` behind a reverse proxy) |
+| `VOST_RECORD` | server | BTC and ETH on Binance, Coinbase and Hyperliquid | Markets recorded at all times: `provider:SYMBOL` or `provider:SYMBOL:tf/tf`, separated by commas or spaces; `off` records nothing |
+| `VOST_RECORD_BARS` | server | `20000` | Bars kept per recorded series (at least 100) |
 | `VOST_SERVER_URL` | dev | `http://localhost:8787` | Target for the Vite dev proxy |
 
 See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for Docker, systemd, nginx/TLS examples and static-hosting notes.
 
 ## Roadmap
 
-- [ ] Drawing tools (trend lines, fibs, rectangles)
-- [ ] Alerts on price/indicator conditions
-- [ ] Multiple chart layouts & compare mode
+- [x] Drawing tools: trend line, horizontal line, ray, rectangle, Fibonacci retracement and text notes (select, move, resize, delete, undo/redo, saved per symbol), per-drawing styles (colour, opacity, width, line style, fill, extend, Fibonacci levels, text size) with a settings dialog (double-click a drawing), saved defaults and per-timeframe visibility, magnet, hide all, delete all and touch drawing with a phone menu, plus a temporary measure tool (price change, percent, bars and time)
+- [x] Price alerts (stored and watched by the server around the clock, optional Telegram message)
+- [ ] Alerts on indicator conditions
+- [x] Multiple chart layouts (named, saved in the browser)
+- [ ] Compare mode
 - [ ] More providers: keyless crypto exchanges (Coinbase, Kraken, Bybit, OKX) then free-key Twelve Data and Alpha Vantage - see [docs/DATA-SOURCES.md](docs/DATA-SOURCES.md)
 - [ ] Walk-forward & portfolio (multi-asset) backtesting
 - [ ] PWA install for full offline app caching
@@ -215,7 +233,7 @@ PRs are very welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Pine Script
 
-Vost can run Pine Script indicators and strategies in the background worker, using [PineTS](https://github.com/QuantForgeOrg/PineTS). PineTS is licensed AGPL-3.0-only; Vost itself stays MIT. See [docs/PINE.md](docs/PINE.md).
+Vost can run Pine Script indicators and strategies in the background worker, using [PineTS](https://github.com/QuantForgeOrg/PineTS). PineTS is licensed AGPL-3.0-only; Vost itself stays MIT. See [docs/PINE.md](docs/PINE.md). The page at `/compare` shows 2 to 4 Pine scripts side by side and marks how each differs from a reference script.
 
 ## Disclaimer
 
@@ -224,3 +242,5 @@ Vost is a tool for research and education. Market data may be delayed, incomplet
 ## License
 
 [MIT](LICENSE) — do whatever you want, no warranty.
+
+The icons, emojis and stickers bundled for the drawing tools come from Lucide, Twemoji and OpenMoji under their own licences, credited in [docs/third-party-notices.md](docs/third-party-notices.md).

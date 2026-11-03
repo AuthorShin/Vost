@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TIMEFRAMES } from '../../../../shared/market.ts';
 import { PROVIDER_CATALOG } from '../../../../shared/providerCatalog.ts';
 import { demoProvider, providers } from './index';
+import { ApiHttpError } from './api';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -28,7 +30,8 @@ describe('provider registry', () => {
       const p = providers.find((x) => x.id === info.id)!;
       expect(typeof p.listSymbols === 'function', info.id).toBe(info.hasSymbolList);
       expect(typeof p.searchSymbols === 'function', info.id).toBe(info.hasSearch);
-      expect(p.timeframes).toEqual(info.timeframes);
+      expect(p.timeframes).toEqual(TIMEFRAMES.filter((tf) => info.timeframes.includes(tf) || info.builtTimeframes.includes(tf)));
+      expect(p.builtTimeframes).toEqual(info.builtTimeframes);
     }
   });
 });
@@ -45,7 +48,7 @@ describe('REST client', () => {
     for (const u of urls) expect(u.startsWith('/api/'), u).toBe(true);
     expect(urls[0]).toBe('/api/history?provider=binance&symbol=X+Y&timeframe=1h&bars=10');
     expect(urls).toContain('/api/search?provider=kraken&q=a+b');
-    expect(urls).toContain('/api/symbols?provider=stooq');
+    expect(urls).toContain('/api/symbols?provider=binance');
   });
 
   it('passes the abort signal on', async () => {
@@ -60,9 +63,31 @@ describe('REST client', () => {
     await expect(providers[2].fetchHistory({ symbol: 'X', timeframe: '1h', bars: 1 })).rejects.toThrow('Kraken: HTTP 503 - down');
   });
 
+  it('keeps the HTTP status on the error and the server text as the message', async () => {
+    stubFetch(() => json({ error: 'No Binance data at or before that time' }, 404));
+    const err = await providers[0].fetchHistory({ symbol: 'X', timeframe: '1h', bars: 1, to: 5 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiHttpError);
+    expect(err).toMatchObject({ status: 404, message: 'No Binance data at or before that time' });
+    stubFetch(() => new Response('oops', { status: 500 }));
+    await expect(providers[0].searchSymbols!('x')).rejects.toMatchObject({ status: 500, message: 'HTTP 500' });
+  });
+
   it('falls back to HTTP <status> when the error body is not JSON', async () => {
     stubFetch(() => new Response('<html>bad gateway</html>', { status: 502 }));
     await expect(providers[0].searchSymbols!('x')).rejects.toThrow('HTTP 502');
+  });
+});
+
+describe('history source', () => {
+  it('puts source=built in the query only when set', async () => {
+    const urls = stubFetch(() => json([]));
+    const p = remote[0];
+    await p.fetchHistory({ symbol: 'A', timeframe: '4h', bars: 10 });
+    await p.fetchHistory({ symbol: 'A', timeframe: '4h', bars: 10, source: 'native' });
+    await p.fetchHistory({ symbol: 'A', timeframe: '4h', bars: 10, source: 'built' });
+    expect(urls[0]).toBe('/api/history?provider=binance&symbol=A&timeframe=4h&bars=10');
+    expect(urls[1]).toBe(urls[0]);
+    expect(urls[2]).toBe(`${urls[0]}&source=built`);
   });
 });
 

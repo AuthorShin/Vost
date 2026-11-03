@@ -9,9 +9,18 @@ services:
     environment:
       PORT: "8787"
       HOST: "0.0.0.0"
+      VOST_RECORD: "${VOST_RECORD:-}"
+      VOST_RECORD_BARS: "${VOST_RECORD_BARS:-}"
+      VOST_TELEGRAM_BOT_TOKEN: "${VOST_TELEGRAM_BOT_TOKEN:-}"
+      VOST_TELEGRAM_CHAT_ID: "${VOST_TELEGRAM_CHAT_ID:-}"
+    volumes:
+      - vost-data:/data
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/api/health"]
       interval: 30s
       timeout: 5s
       start_period: 5s
       retries: 3
+
+volumes:
+  vost-data: {}

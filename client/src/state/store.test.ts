@@ -1,34 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fmtTime } from '../lib/format';
-
-function stubStorage() {
-  const store: Record<string, string> = {};
-  vi.stubGlobal('localStorage', {
-    getItem: (k: string) => store[k] ?? null,
-    setItem: (k: string, v: string) => void (store[k] = v),
-    removeItem: (k: string) => void delete store[k],
-  });
-}
-
-type TestStore = (typeof import('./store'))['useStore'];
-const used: TestStore[] = [];
-const track = (s: TestStore) => {
-  used.push(s);
-  return s;
-};
-
-async function afterEachCleanup() {
-  const stores = used.splice(0);
-  for (const s of stores) {
-    await vi.waitFor(() => {
-      expect(Object.values(s.getState().pineRuns).some((r) => r.running)).toBe(false);
-    }, { timeout: 20000 });
-    // flush while this test's storage stub is still in place
-    s.getState().flushPersist();
-  }
-  vi.unstubAllGlobals();
-  vi.useRealTimers();
-}
+import { afterEachCleanup, chartOf, markUsed, stubStorage, track, snap } from './stateTestKit';
 
 afterEach(afterEachCleanup);
 
@@ -41,7 +12,7 @@ describe('addSymbolToWatchlist', () => {
   it('adds to the active list once; a second call is a no-op', async () => {
     const { useStore } = await import('./store');
     track(useStore);
-    const st = useStore.getState();
+    const st = snap(useStore);
     const count = () =>
       useStore.getState().watchlists.lists.find((l) => l.id === useStore.getState().watchlists.activeListId)!.sections
         .flatMap((s) => s.items)
@@ -54,114 +25,6 @@ describe('addSymbolToWatchlist', () => {
   });
 });
 
-describe('pine indicators', () => {
-  beforeEach(() => {
-    vi.resetModules();
-    stubStorage();
-  });
-
-  async function setup() {
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const { candlesFromCsvText } = await import('../lib/csv');
-    const text = readFileSync(fileURLToPath(new URL('../../../examples/sample-daily.csv', import.meta.url)), 'utf8');
-    const candles = candlesFromCsvText(text).candles;
-    const { useStore } = await import('./store');
-    track(useStore);
-    useStore.setState({ candles });
-    return { useStore, candles };
-  }
-
-  const settle = async (useStore: Awaited<ReturnType<typeof setup>>['useStore'], id: string) => {
-    await vi.waitFor(() => {
-      const run = useStore.getState().pineRuns[id];
-      expect(run && !run.running).toBe(true);
-    }, { timeout: 20000 });
-    return useStore.getState().pineRuns[id];
-  };
-  const pineId = (useStore: Awaited<ReturnType<typeof setup>>['useStore']) =>
-    useStore.getState().indicators.find((i) => i.kind === 'pine')!.id;
-
-  it('adds a pine indicator, runs it, and recomputes when an input changes', async () => {
-    const { useStore, candles } = await setup();
-    useStore.getState().addIndicator('pine');
-    const id = pineId(useStore);
-    const first = await settle(useStore, id);
-    expect(first.error).toBeUndefined();
-    expect(first.result!.inputs.map((i) => i.name)).toEqual(['Fast', 'Slow']);
-    expect(first.result!.plots[0].values).toHaveLength(candles.length);
-
-    useStore.getState().updateIndicator(id, { inputs: { Fast: 3 } });
-    await vi.waitFor(() => expect(useStore.getState().pineRuns[id].result).not.toBe(first.result), { timeout: 20000 });
-    const second = await settle(useStore, id);
-    const spec = useStore.getState().indicators.find((i) => i.id === id)!;
-    expect(spec.inputs).toEqual({ Fast: 3 });
-    // a 3-bar EMA has a value from bar 3 on; a 9-bar one does not
-    expect(first.result!.plots[0].values[4]).toBeNull();
-    expect(second.result!.plots[0].values[4]).not.toBeNull();
-  });
-
-  it('shows a compile error on the entry and leaves other indicators alone', async () => {
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const { useStore } = await setup();
-    const bad = readFileSync(fileURLToPath(new URL('../lib/pine/fixtures/syntax-error.pine', import.meta.url)), 'utf8');
-    useStore.getState().addIndicator('pine');
-    const id = pineId(useStore);
-    await settle(useStore, id);
-    useStore.getState().updateIndicator(id, { source: bad });
-    await vi.waitFor(() => expect(useStore.getState().pineRuns[id].error).toBeDefined(), { timeout: 20000 });
-    const run = await settle(useStore, id);
-    expect(run.error!.message).toBeTruthy();
-    expect(run.error!.line).toBeTypeOf('number');
-    const { computeIndicator } = await import('../lib/indicatorCompute');
-    const sma = useStore.getState().indicators.find((i) => i.kind === 'sma')!;
-    expect(computeIndicator(sma, useStore.getState().candles)[0].data.length).toBeGreaterThan(0);
-  });
-
-  it('persists source and inputs; old prefs without pine entries still load', async () => {
-    vi.useFakeTimers();
-    try {
-      const { useStore } = await setup();
-      useStore.getState().addIndicator('pine');
-      const id = pineId(useStore);
-      useStore.getState().updateIndicator(id, { source: '//@version=6\nindicator("X")\nplot(close)\n', inputs: { Fast: 4 } });
-      vi.advanceTimersByTime(1000);
-      const raw = localStorage.getItem('vost.prefs.v1');
-      expect(raw).not.toBeNull();
-      // Reload: a fresh store reads the same prefs back.
-      vi.resetModules();
-      vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
-      const fresh = track((await import('./store')).useStore);
-      fresh.getState().init();
-      const pine = fresh.getState().indicators.find((i) => i.id === id)!;
-      expect(pine.kind).toBe('pine');
-      expect(pine.source).toContain('plot(close)');
-      expect(pine.inputs).toEqual({ Fast: 4 });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('loads old saved prefs that have no pine entries', async () => {
-    localStorage.setItem(
-      'vost.prefs.v1',
-      JSON.stringify({
-        providerId: 'binance',
-        symbol: 'BTCUSDT',
-        timeframe: '1h',
-        bars: 100,
-        indicators: [{ id: 'old1', kind: 'sma', params: { length: 5 }, color: '#fff', visible: true }],
-      }),
-    );
-    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
-    const { useStore } = await import('./store');
-    track(useStore);
-    useStore.getState().init();
-    expect(useStore.getState().indicators.map((i) => i.id)).toEqual(['old1']);
-    expect(useStore.getState().pineRuns).toEqual({});
-  });
-});
 
 describe('timeZone pref', () => {
   beforeEach(() => {
@@ -212,36 +75,14 @@ describe('timeZone pref', () => {
   });
 });
 
-describe('openWatchItem', () => {
-  beforeEach(() => {
-    vi.resetModules();
-    stubStorage();
-  });
-
-  it('sets provider and symbol together and loads once', async () => {
-    const { useStore } = await import('./store');
-    track(useStore);
-    const seen: Array<{ providerId: string; symbol: string }> = [];
-    const loadData = vi.fn().mockImplementation(async () => {
-      const { providerId, symbol } = useStore.getState();
-      seen.push({ providerId, symbol });
-    });
-    useStore.setState({ loadData });
-    useStore.getState().openWatchItem('kraken', 'XBTUSD');
-    expect(seen).toEqual([{ providerId: 'kraken', symbol: 'XBTUSD' }]);
-    expect(useStore.getState().providerId).toBe('kraken');
-    expect(useStore.getState().symbol).toBe('XBTUSD');
-    expect(loadData).toHaveBeenCalledTimes(1);
-  });
-});
 
 describe('stale persist isolation', () => {
   it('a pending save from a previous store cannot write into the next test', async () => {
     vi.resetModules();
     stubStorage();
     const { useStore } = await import('./store');
-    useStore.getState().addIndicator('sma');
-    used.push(useStore);
+    chartOf(useStore).getState().addIndicator('sma');
+    markUsed(useStore);
     await afterEachCleanup();
     stubStorage();
     await new Promise((r) => setTimeout(r, 700));
@@ -249,501 +90,6 @@ describe('stale persist isolation', () => {
   });
 });
 
-describe('btRange', () => {
-  beforeEach(() => {
-    vi.resetModules();
-    stubStorage();
-  });
-
-  async function setup() {
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const { candlesFromCsvText } = await import('../lib/csv');
-    const text = readFileSync(fileURLToPath(new URL('../../../examples/sample-daily.csv', import.meta.url)), 'utf8');
-    const candles = candlesFromCsvText(text).candles;
-    const { useStore } = await import('./store');
-    track(useStore);
-    useStore.setState({ candles });
-    return { useStore, candles };
-  }
-
-  const freshFromPrefs = async (btRange: unknown) => {
-    localStorage.setItem('vost.prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, btRange }));
-    vi.resetModules();
-    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
-    const fresh = track((await import('./store')).useStore);
-    fresh.getState().init();
-    return fresh;
-  };
-
-  it('runBacktest only sees in-range bars', async () => {
-    const { useStore, candles } = await setup();
-    const from = candles[20].time;
-    const to = candles[80].time;
-    useStore.getState().setBtRange({ from, to });
-    await useStore.getState().runBacktest();
-    const r = useStore.getState().btResult!;
-    expect(r).not.toBeNull();
-    expect(r.equity[0].time).toBe(from);
-    expect(r.equity[r.equity.length - 1].time).toBe(to);
-    for (const t of r.trades) {
-      expect(t.entryTime).toBeGreaterThanOrEqual(from);
-      expect(t.exitTime).toBeLessThanOrEqual(to);
-    }
-  });
-
-  it('runOptimizer sends only in-range bars to the worker', async () => {
-    const { useStore, candles } = await setup();
-    const sent: { candles: { time: number }[] }[] = [];
-    class FakeWorker {
-      onmessage: ((ev: { data: unknown }) => void) | null = null;
-      onerror: (() => void) | null = null;
-      postMessage(req: { id: string; candles: { time: number }[] }) {
-        sent.push(req);
-        queueMicrotask(() =>
-          this.onmessage?.({ data: { id: req.id, type: 'optimizeResult', rows: [], metric: 'sharpe', combos: 0, errored: 0 } }),
-        );
-      }
-    }
-    vi.stubGlobal('Worker', FakeWorker);
-    const from = candles[10].time;
-    const to = candles[40].time;
-    useStore.getState().setBtRange({ from, to });
-    await useStore.getState().runOptimizer();
-    expect(sent).toHaveLength(1);
-    expect(sent[0].candles).toHaveLength(31);
-    expect(sent[0].candles[0].time).toBe(from);
-    expect(sent[0].candles[30].time).toBe(to);
-  });
-
-  it('From later than To starts nothing and pushes an error toast', async () => {
-    const { useStore, candles } = await setup();
-    useStore.getState().setBtRange({ from: candles[50].time, to: candles[10].time });
-    await useStore.getState().runBacktest();
-    await useStore.getState().runOptimizer();
-    const s = useStore.getState();
-    expect(s.btRunning).toBe(false);
-    expect(s.optRunning).toBe(false);
-    expect(s.btResult).toBeNull();
-    expect(s.toasts.some((t) => t.kind === 'error' && t.text.includes('From is later than To'))).toBe(true);
-  });
-
-  it('a range with fewer than 3 bars starts nothing', async () => {
-    const { useStore, candles } = await setup();
-    useStore.getState().setBtRange({ from: candles[5].time, to: candles[6].time });
-    await useStore.getState().runBacktest();
-    expect(useStore.getState().btResult).toBeNull();
-    expect(useStore.getState().toasts.some((t) => t.text.includes('Fewer than 3 bars'))).toBe(true);
-  });
-
-  it('persists setBtRange and a fresh store reads it back', async () => {
-    vi.useFakeTimers();
-    try {
-      const { useStore } = await setup();
-      useStore.getState().setBtRange({ from: 100, to: null });
-      vi.advanceTimersByTime(1000);
-      expect(JSON.parse(localStorage.getItem('vost.prefs.v1')!).btRange).toEqual({ from: 100, to: null });
-      const fresh = await freshFromPrefs(JSON.parse(localStorage.getItem('vost.prefs.v1')!).btRange);
-      expect(fresh.getState().btRange).toEqual({ from: 100, to: null });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('old prefs and malformed values fall back to an open range', async () => {
-    for (const stored of [undefined, 'x', { from: 'a' }, { from: 1 }, null]) {
-      const fresh = await freshFromPrefs(stored);
-      expect(fresh.getState().btRange).toEqual({ from: null, to: null });
-    }
-  });
-
-  it('keeps the range across a new data load', async () => {
-    const { useStore, candles } = await setup();
-    useStore.getState().setBtRange({ from: 5, to: 9 });
-    const id = useStore.getState().addDataset({
-      name: 'd1',
-      candles,
-      source: 'csv',
-      description: 'd1',
-      barSeconds: 86400,
-      barLabel: '1d',
-    });
-    useStore.getState().activateDataset(id);
-    expect(useStore.getState().dataLabel).toBeTruthy();
-    expect(useStore.getState().btRange).toEqual({ from: 5, to: 9 });
-  });
-});
-
-describe('chartRange', () => {
-  beforeEach(() => {
-    vi.resetModules();
-    stubStorage();
-  });
-
-  async function setup() {
-    const { readFileSync } = await import('node:fs');
-    const { fileURLToPath } = await import('node:url');
-    const { candlesFromCsvText } = await import('../lib/csv');
-    const text = readFileSync(fileURLToPath(new URL('../../../examples/sample-daily.csv', import.meta.url)), 'utf8');
-    const candles = candlesFromCsvText(text).candles;
-    const { useStore } = await import('./store');
-    track(useStore);
-    useStore.setState({ candles });
-    return { useStore, candles };
-  }
-
-  const errorCount = (s: { messages: { severity: string }[] }) => s.messages.filter((m) => m.severity === 'error').length;
-
-  it('crops inclusively, keeps the full bars and leaves btRange alone', async () => {
-    const { useStore, candles } = await setup();
-    const key = useStore.getState().dataKey;
-    const from = candles[20].time;
-    const to = candles[80].time;
-    await useStore.getState().setChartRange({ from, to });
-    const s = useStore.getState();
-    expect(s.candles).toHaveLength(61);
-    expect(s.candles[0].time).toBe(from);
-    expect(s.candles[60].time).toBe(to);
-    expect(s.fullCandles).toEqual(candles);
-    expect(s.chartRange).toEqual({ from, to });
-    expect(s.dataKey).not.toBe(key);
-    expect(s.btRange).toEqual({ from: null, to: null });
-  });
-
-  it('setBtRange leaves chartRange untouched', async () => {
-    const { useStore, candles } = await setup();
-    await useStore.getState().setChartRange({ from: candles[20].time, to: candles[80].time });
-    useStore.getState().setBtRange({ from: candles[30].time, to: null });
-    expect(useStore.getState().chartRange).toEqual({ from: candles[20].time, to: candles[80].time });
-  });
-
-  it('refuses a chart range while live is on', async () => {
-    const { useStore, candles } = await setup();
-    useStore.setState({ live: true });
-    await useStore.getState().setChartRange({ from: candles[20].time, to: candles[80].time });
-    const s = useStore.getState();
-    expect(s.chartRange).toBeNull();
-    expect(s.candles).toHaveLength(candles.length);
-    expect(s.toasts[s.toasts.length - 1].text).toContain('Turn live off');
-    useStore.setState({ live: false });
-  });
-
-  it('a second apply slices from the full set', async () => {
-    const { useStore, candles } = await setup();
-    await useStore.getState().setChartRange({ from: candles[20].time, to: candles[30].time });
-    await useStore.getState().setChartRange({ from: candles[10].time, to: candles[90].time });
-    expect(useStore.getState().candles).toHaveLength(81);
-    expect(useStore.getState().fullCandles).toEqual(candles);
-  });
-
-  it('refusals add one error and change nothing', async () => {
-    const { useStore, candles } = await setup();
-    useStore.setState({ activeDatasetId: 'local' }); // a local dataset cannot fetch more
-    await useStore.getState().setChartRange({ from: candles[20].time, to: candles[80].time });
-    const before = useStore.getState();
-    const cases: [{ from: number | null; to: number | null }, string][] = [
-      [{ from: candles[0].time - 1, to: null }, 'Range is outside this dataset'],
-      [{ from: null, to: candles[candles.length - 1].time + 1 }, 'Range is outside this dataset'],
-      [{ from: candles[50].time, to: candles[10].time }, 'From is later than To'],
-      [{ from: candles[5].time, to: candles[5].time }, 'Fewer than 2 bars in the chart range'],
-    ];
-    let n = errorCount(before);
-    for (const [range, text] of cases) {
-      await useStore.getState().setChartRange(range);
-      const s = useStore.getState();
-      expect(errorCount(s)).toBe(++n);
-      expect(s.toasts.some((t) => t.kind === 'error' && t.text === text)).toBe(true);
-      expect(s.candles).toBe(before.candles);
-      expect(s.dataKey).toBe(before.dataKey);
-      expect(s.chartRange).toBe(before.chartRange);
-    }
-  });
-
-  it('refusals on uncropped data change nothing', async () => {
-    const { useStore, candles } = await setup();
-    useStore.setState({ activeDatasetId: 'local' });
-    const key = useStore.getState().dataKey;
-    await useStore.getState().setChartRange({ from: candles[0].time - 5, to: null });
-    const s = useStore.getState();
-    expect(s.chartRange).toBeNull();
-    expect(s.fullCandles).toBeNull();
-    expect(s.candles).toBe(candles);
-    expect(s.dataKey).toBe(key);
-  });
-
-  it('clearChartRange restores the bars without fetching', async () => {
-    const { useStore, candles } = await setup();
-    const fetchSpy = vi.fn(() => {
-      throw new Error('no fetch expected');
-    });
-    vi.stubGlobal('fetch', fetchSpy);
-    await useStore.getState().setChartRange({ from: candles[20].time, to: candles[80].time });
-    const key = useStore.getState().dataKey;
-    await useStore.getState().clearChartRange();
-    const s = useStore.getState();
-    expect(s.candles).toBe(candles);
-    expect(s.fullCandles).toBeNull();
-    expect(s.chartRange).toBeNull();
-    expect(s.dataKey).not.toBe(key);
-    expect(fetchSpy).not.toHaveBeenCalled();
-  });
-
-  it('an open range acts as Clear', async () => {
-    const { useStore, candles } = await setup();
-    await useStore.getState().setChartRange({ from: candles[20].time, to: candles[80].time });
-    await useStore.getState().setChartRange({ from: null, to: null });
-    expect(useStore.getState().candles).toBe(candles);
-    expect(useStore.getState().chartRange).toBeNull();
-  });
-
-  it('activateDataset, addDataset and clearData reset the range', async () => {
-    const { useStore, candles } = await setup();
-    const input = { name: 'd1', candles, source: 'csv', description: 'd1', barSeconds: 86400, barLabel: '1d' };
-    const range = { from: candles[20].time, to: candles[80].time };
-    await useStore.getState().setChartRange(range);
-    const id = useStore.getState().addDataset(input);
-    expect(useStore.getState().chartRange).toBeNull();
-    expect(useStore.getState().fullCandles).toBeNull();
-    await useStore.getState().setChartRange(range);
-    useStore.getState().activateDataset(id);
-    expect(useStore.getState().chartRange).toBeNull();
-    expect(useStore.getState().candles).toHaveLength(candles.length);
-    await useStore.getState().setChartRange(range);
-    useStore.getState().clearData();
-    expect(useStore.getState().chartRange).toBeNull();
-    expect(useStore.getState().fullCandles).toBeNull();
-  });
-
-  it('loadData resets the range', async () => {
-    const { useStore, candles } = await setup();
-    useStore.setState({ providerId: 'demo', bars: 200 });
-    await useStore.getState().setChartRange({ from: candles[20].time, to: candles[80].time });
-    await useStore.getState().loadData();
-    expect(useStore.getState().loadState).toBe('ready');
-    expect(useStore.getState().chartRange).toBeNull();
-    expect(useStore.getState().fullCandles).toBeNull();
-  });
-
-  it('setLive(true) restores the full candles first', async () => {
-    const { useStore, candles } = await setup();
-    const { getProvider } = await import('../lib/providers');
-    const provider = getProvider('binance');
-    const orig = provider.startLive;
-    provider.startLive = () => ({ stop() {} });
-    try {
-      await useStore.getState().setChartRange({ from: candles[20].time, to: candles[80].time });
-      useStore.getState().setLive(true);
-      expect(useStore.getState().candles).toBe(candles);
-      expect(useStore.getState().chartRange).toBeNull();
-      useStore.getState().setLive(false);
-    } finally {
-      provider.startLive = orig;
-    }
-  });
-
-  it('runBacktest runs only on the cropped bars', async () => {
-    const { useStore, candles } = await setup();
-    const from = candles[20].time;
-    const to = candles[80].time;
-    await useStore.getState().setChartRange({ from, to });
-    await useStore.getState().runBacktest();
-    const r = useStore.getState().btResult!;
-    expect(r.equity[0].time).toBe(from);
-    expect(r.equity[r.equity.length - 1].time).toBe(to);
-  });
-
-  it('saveCurrentDataset stores the full candles', async () => {
-    const { useStore, candles } = await setup();
-    await useStore.getState().setChartRange({ from: candles[20].time, to: candles[80].time });
-    useStore.getState().saveCurrentDataset('full');
-    const saved = useStore.getState().datasets.find((d) => d.name === 'full')!;
-    expect(saved.candles).toHaveLength(candles.length);
-  });
-
-  it('is not persisted and a fresh store has no range', async () => {
-    vi.useFakeTimers();
-    try {
-      const { useStore, candles } = await setup();
-      await useStore.getState().setChartRange({ from: candles[20].time, to: candles[80].time });
-      useStore.getState().setBars(300);
-      vi.advanceTimersByTime(1000);
-      expect(localStorage.getItem('vost.prefs.v1')).not.toContain('chartRange');
-      vi.resetModules();
-      vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
-      const fresh = track((await import('./store')).useStore);
-      fresh.getState().init();
-      expect(fresh.getState().chartRange).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe('chartRange fetched from the provider', () => {
-  beforeEach(() => {
-    vi.resetModules();
-    stubStorage();
-  });
-
-  const DAY = 86400;
-  const mk = (from: number, n: number) =>
-    Array.from({ length: n }, (_, i) => ({ time: from + i * DAY, open: 1, high: 2, low: 0.5, close: 1.5, volume: 1 }));
-
-  async function setup() {
-    const { useStore } = await import('./store');
-    track(useStore);
-    const { demoProvider } = await import('../lib/providers');
-    const base = mk(1_600_000_000 - (1_600_000_000 % DAY), 100);
-    useStore.setState({ providerId: 'demo', symbol: 'DEMO', timeframe: '1d', bars: 100, candles: base, activeDatasetId: null });
-    const calls: { from?: number; to?: number; bars: number }[] = [];
-    let handler: (req: { from?: number; to?: number; bars: number }) => Promise<ReturnType<typeof mk>> = async (req) =>
-      mk(req.from!, Math.floor((req.to! - req.from!) / DAY) + 1);
-    const spy = vi.spyOn(demoProvider, 'fetchHistory').mockImplementation(async (req) => {
-      calls.push({ from: req.from, to: req.to, bars: req.bars });
-      return handler(req);
-    });
-    return { useStore, base, calls, spy, setHandler: (h: typeof handler) => (handler = h) };
-  }
-
-  it('fetches a span outside the loaded bars, then crops inside it without a request', async () => {
-    const { useStore, base, calls } = await setup();
-    const from = base[0].time - 50 * DAY;
-    const to = base[0].time - 20 * DAY;
-    const key = useStore.getState().dataKey;
-    expect(await useStore.getState().setChartRange({ from, to })).toBe(true);
-    const s = useStore.getState();
-    expect(calls).toEqual([{ from, to, bars: 100 }]);
-    expect(s.candles).toHaveLength(31);
-    expect(s.fullCandles).toHaveLength(31);
-    expect(s.chartRange).toEqual({ from, to });
-    expect(s.chartRangeFetched).toBe(true);
-    expect(s.dataKey).not.toBe(key);
-    expect(s.loadState).toBe('ready');
-    const { fmtDataRange } = await import('../lib/format');
-    expect(fmtDataRange(s.candles[0].time, s.candles[30].time, s.candles.length, { timeZone: 'UTC' })).toContain('31');
-    // inside the fetched span: crop only
-    expect(await useStore.getState().setChartRange({ from: from + 5 * DAY, to: from + 10 * DAY })).toBe(true);
-    expect(calls).toHaveLength(1);
-    expect(useStore.getState().candles).toHaveLength(6);
-    // outside the fetched span: fetch again
-    expect(await useStore.getState().setChartRange({ from: from - 10 * DAY, to })).toBe(true);
-    expect(calls).toHaveLength(2);
-  });
-
-  it('a range inside the loaded bars crops with no request', async () => {
-    const { useStore, base, calls } = await setup();
-    expect(await useStore.getState().setChartRange({ from: base[10].time, to: base[20].time })).toBe(true);
-    expect(calls).toHaveLength(0);
-    expect(useStore.getState().chartRangeFetched).toBe(false);
-  });
-
-  it('an open From sends to and the current bars; an open To sends only from', async () => {
-    const { useStore, base, calls } = await setup();
-    await useStore.getState().setChartRange({ from: null, to: base[99].time + 10 * DAY });
-    expect(calls[0]).toEqual({ from: undefined, to: base[99].time + 10 * DAY, bars: 100 });
-    await useStore.getState().setChartRange({ from: base[0].time - 10 * DAY, to: null });
-    expect(calls[1]).toEqual({ from: base[0].time - 10 * DAY, to: undefined, bars: 100 });
-  });
-
-  it('from after to is refused before any request', async () => {
-    const { useStore, base, calls } = await setup();
-    expect(await useStore.getState().setChartRange({ from: base[0].time - DAY, to: base[0].time - 5 * DAY })).toBe(false);
-    expect(calls).toHaveLength(0);
-    expect(useStore.getState().toasts.some((t) => t.text === 'From is later than To')).toBe(true);
-  });
-
-  it('clearChartRange after a fetch reloads the latest bars and resets the flag', async () => {
-    const { useStore, base, calls, setHandler } = await setup();
-    await useStore.getState().setChartRange({ from: base[0].time - 50 * DAY, to: base[0].time - 20 * DAY });
-    setHandler(async () => base);
-    await useStore.getState().clearChartRange();
-    expect(calls[1]).toEqual({ from: undefined, to: undefined, bars: 100 });
-    const s = useStore.getState();
-    expect(s.candles).toEqual(base);
-    expect(s.chartRange).toBeNull();
-    expect(s.fullCandles).toBeNull();
-    expect(s.chartRangeFetched).toBe(false);
-  });
-
-  it('a provider error toasts once, keeps the data and resolves false', async () => {
-    const { useStore, base, setHandler } = await setup();
-    setHandler(async () => {
-      throw new Error('boom');
-    });
-    const before = useStore.getState();
-    expect(await useStore.getState().setChartRange({ from: base[0].time - 50 * DAY, to: base[0].time - 20 * DAY })).toBe(false);
-    const s = useStore.getState();
-    expect(s.candles).toBe(before.candles);
-    expect(s.chartRange).toBeNull();
-    expect(s.loadState).toBe('ready');
-    expect(s.toasts.filter((t) => t.kind === 'error').map((t) => t.text)).toEqual(['Could not load range: boom']);
-    expect(s.messages.filter((m) => m.severity === 'error')).toHaveLength(1);
-  });
-
-  it('fewer than 2 bars returned is refused', async () => {
-    const { useStore, base, setHandler } = await setup();
-    setHandler(async (req) => mk(req.from!, 1));
-    expect(await useStore.getState().setChartRange({ from: base[0].time - 50 * DAY, to: base[0].time - 20 * DAY })).toBe(false);
-    expect(useStore.getState().candles).toBe(base);
-    expect(useStore.getState().toasts.some((t) => t.text === 'Fewer than 2 bars in the chart range')).toBe(true);
-  });
-
-  it('a result arriving after a symbol change or a newer load is dropped', async () => {
-    const { useStore, base, setHandler } = await setup();
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    setHandler(async (req) => {
-      await gate;
-      return mk(req.from!, 31);
-    });
-    const p = useStore.getState().setChartRange({ from: base[0].time - 50 * DAY, to: base[0].time - 20 * DAY });
-    expect(useStore.getState().loadState).toBe('loading');
-    useStore.setState({ symbol: 'DEMO-BEAR' });
-    release();
-    expect(await p).toBe(false);
-    expect(useStore.getState().candles).toBe(base);
-    expect(useStore.getState().chartRangeFetched).toBe(false);
-    expect(useStore.getState().toasts).toHaveLength(0);
-
-    // a newer loadData wins over an older range fetch
-    useStore.setState({ symbol: 'DEMO' });
-    let release2!: () => void;
-    const gate2 = new Promise<void>((r) => (release2 = r));
-    setHandler(async (req) => {
-      if (req.from == null) return base;
-      await gate2;
-      return mk(req.from, 31);
-    });
-    const p2 = useStore.getState().setChartRange({ from: base[0].time - 50 * DAY, to: base[0].time - 20 * DAY });
-    await useStore.getState().loadData();
-    release2();
-    expect(await p2).toBe(false);
-    expect(useStore.getState().candles).toBe(base);
-    expect(useStore.getState().chartRange).toBeNull();
-    expect(useStore.getState().loadState).toBe('ready');
-  });
-
-  it('partial coverage adds an inbox warning and an info toast naming the first date', async () => {
-    const { useStore, base, setHandler } = await setup();
-    const from = base[0].time - 50 * DAY;
-    setHandler(async () => mk(from + 10 * DAY, 21));
-    useStore.setState({ timeZone: 'UTC' });
-    expect(await useStore.getState().setChartRange({ from, to: from + 30 * DAY })).toBe(true);
-    const s = useStore.getState();
-    expect(s.messages.filter((m) => m.severity === 'warning')).toHaveLength(1);
-    const firstDate = fmtTime(from + 10 * DAY, { timeZone: 'UTC' });
-    expect(s.messages.find((m) => m.severity === 'warning')!.text).toContain(`only from ${firstDate}`);
-    expect(s.toasts.filter((t) => t.kind === 'info')).toHaveLength(1);
-  });
-
-  it('a local dataset refuses with the dataset wording and no request', async () => {
-    const { useStore, base, calls } = await setup();
-    useStore.setState({ activeDatasetId: 'local' });
-    expect(await useStore.getState().setChartRange({ from: base[0].time - 50 * DAY, to: base[0].time - 20 * DAY })).toBe(false);
-    expect(calls).toHaveLength(0);
-    expect(useStore.getState().toasts.some((t) => t.text === 'Range is outside this dataset')).toBe(true);
-  });
-});
 
 describe('pine editor selection', () => {
   beforeEach(() => {
@@ -751,16 +97,32 @@ describe('pine editor selection', () => {
     stubStorage();
   });
 
-  it('openPineEditor opens the Pine tab on the indicator and expands the dock', async () => {
+  it('openPineEditor opens the pane on the indicator and leaves the dock alone', async () => {
     const { useStore } = await import('./store');
     track(useStore);
-    const id = useStore.getState().addIndicator('pine');
+    const id = chartOf(useStore).getState().addIndicator('pine');
     useStore.getState().setDockCollapsed(true);
+    useStore.getState().setDockTab('results');
+    useStore.getState().setDockCollapsed(true);
+    expect(useStore.getState().pineOpen).toBe(false);
     useStore.getState().openPineEditor(id);
-    const st = useStore.getState();
-    expect(st.dockTab).toBe('pine');
+    const st = snap(useStore);
+    expect(st.pineOpen).toBe(true);
     expect(st.selectedPineId).toBe(id);
-    expect(st.dockCollapsed).toBe(false);
+    expect(st.dockCollapsed).toBe(true);
+    expect(st.dockTab).toBe('results');
+  });
+
+  it('closePineEditor and togglePineEditor close and flip the pane', async () => {
+    const { useStore } = await import('./store');
+    track(useStore);
+    useStore.getState().openPineEditor(chartOf(useStore).getState().addIndicator('pine'));
+    useStore.getState().closePineEditor();
+    expect(useStore.getState().pineOpen).toBe(false);
+    useStore.getState().togglePineEditor();
+    expect(useStore.getState().pineOpen).toBe(true);
+    useStore.getState().togglePineEditor();
+    expect(useStore.getState().pineOpen).toBe(false);
   });
 
   it('collapsing then expanding keeps dockHeight, and openPineEditor keeps it too', async () => {
@@ -772,21 +134,20 @@ describe('pine editor selection', () => {
     useStore.getState().setDockCollapsed(false);
     expect(useStore.getState().dockHeight).toBe(410);
     useStore.getState().setDockCollapsed(true);
-    useStore.getState().openPineEditor(useStore.getState().addIndicator('pine'));
-    expect(useStore.getState().dockCollapsed).toBe(false);
+    useStore.getState().openPineEditor(chartOf(useStore).getState().addIndicator('pine'));
     expect(useStore.getState().dockHeight).toBe(410);
   });
 
   it('removing the selected Pine indicator moves the selection', async () => {
     const { useStore } = await import('./store');
     track(useStore);
-    const a = useStore.getState().addIndicator('pine');
-    const b = useStore.getState().addIndicator('pine');
+    const a = chartOf(useStore).getState().addIndicator('pine');
+    const b = chartOf(useStore).getState().addIndicator('pine');
     useStore.getState().openPineEditor(b);
-    useStore.getState().removeIndicator(b);
-    expect(useStore.getState().selectedPineId).toBe(a);
-    useStore.getState().removeIndicator(a);
-    expect(useStore.getState().selectedPineId).toBeNull();
+    chartOf(useStore).getState().removeIndicator(b);
+    expect(chartOf(useStore).getState().selectedPineId).toBe(a);
+    chartOf(useStore).getState().removeIndicator(a);
+    expect(chartOf(useStore).getState().selectedPineId).toBeNull();
   });
 });
 
@@ -810,6 +171,26 @@ describe('pane size prefs', () => {
     useStore.getState().init();
     expect(useStore.getState().sidebarWidth).toBe(264);
     expect(useStore.getState().dockHeight).toBe(320);
+    expect(useStore.getState().pineWidth).toBe(440);
+  });
+
+  it('a garbage pineWidth loads the default', async () => {
+    localStorage.setItem('vost.prefs.v1', JSON.stringify({ ...base, pineWidth: 'wide' }));
+    const useStore = await fresh();
+    useStore.getState().init();
+    expect(useStore.getState().pineWidth).toBe(440);
+  });
+
+  it('persists pineWidth and a fresh store reads it back', async () => {
+    const a = await fresh();
+    a.getState().setPineWidth(500);
+    a.getState().flushPersist();
+    expect(JSON.parse(localStorage.getItem('vost.prefs.v1')!).pineWidth).toBe(500);
+    vi.resetModules();
+    const b = await fresh();
+    b.getState().init();
+    expect(b.getState().pineWidth).toBe(500);
+    expect(b.getState().pineOpen).toBe(false);
   });
 
   it('non-numeric and non-finite stored sizes load the defaults', async () => {
@@ -833,5 +214,538 @@ describe('pane size prefs', () => {
     b.getState().init();
     expect(b.getState().sidebarWidth).toBe(900);
     expect(b.getState().dockHeight).toBe(410);
+  });
+
+  it('prefs without a side panel load an open watchlist', async () => {
+    localStorage.setItem('vost.prefs.v1', JSON.stringify(base));
+    const useStore = await fresh();
+    useStore.getState().init();
+    expect(useStore.getState().sidePanel).toBe('watchlist');
+    expect(useStore.getState().sidePanelCollapsed).toBe(false);
+  });
+
+  it('junk side panel prefs load the defaults', async () => {
+    localStorage.setItem('vost.prefs.v1', JSON.stringify({ ...base, sidePanel: 'charts', sidePanelCollapsed: 'yes' }));
+    const useStore = await fresh();
+    useStore.getState().init();
+    expect(useStore.getState().sidePanel).toBe('watchlist');
+    expect(useStore.getState().sidePanelCollapsed).toBe(false);
+  });
+
+  it('loads the object tree section', async () => {
+    localStorage.setItem('vost.prefs.v1', JSON.stringify({ ...base, sidePanel: 'objects' }));
+    const useStore = await fresh();
+    useStore.getState().init();
+    expect(useStore.getState().sidePanel).toBe('objects');
+    useStore.getState().setSidePanel('data');
+    useStore.getState().setSidePanel('objects');
+    expect(useStore.getState().sidePanel).toBe('objects');
+  });
+
+  it('persists the side panel and a fresh store reads it back', async () => {
+    const a = await fresh();
+    a.getState().setSidePanel('indicators');
+    a.getState().setSidePanelCollapsed(true);
+    a.getState().flushPersist();
+    const saved = JSON.parse(localStorage.getItem('vost.prefs.v1')!);
+    expect(saved.sidePanel).toBe('indicators');
+    expect(saved.sidePanelCollapsed).toBe(true);
+    vi.resetModules();
+    const b = await fresh();
+    b.getState().init();
+    expect(b.getState().sidePanel).toBe('indicators');
+    expect(b.getState().sidePanelCollapsed).toBe(true);
+  });
+});
+
+
+describe('init with saved prefs', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    stubStorage();
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+  });
+
+  const startWith = async (prefs: object) => {
+    localStorage.setItem('vost.prefs.v1', JSON.stringify(prefs));
+    const { useStore } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    return snap(useStore);
+  };
+
+  it('opens on the default market when the stored provider is gone', async () => {
+    const st = await startWith({ providerId: 'stooq', symbol: 'aapl.us', timeframe: '1d' });
+    expect([st.providerId, st.symbol, st.timeframe]).toEqual(['binance', 'BTCUSDT', '1h']);
+  });
+
+  it('keeps a stored demo market', async () => {
+    const st = await startWith({ providerId: 'demo', symbol: 'DEMO', timeframe: '1d' });
+    expect([st.providerId, st.symbol, st.timeframe]).toEqual(['demo', 'DEMO', '1d']);
+  });
+});
+
+describe('historyLoading setting', () => {
+  async function fresh(saved?: unknown) {
+    vi.resetModules();
+    stubStorage();
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+    if (saved !== undefined) {
+      localStorage.setItem('vost.prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, historyLoading: saved }));
+    }
+    const { useStore } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    return useStore;
+  }
+
+  it('defaults to scroll; a missing or bad saved value reads as scroll', async () => {
+    expect((await fresh()).getState().historyLoading).toBe('scroll');
+    for (const bad of ['everything', 1, null, true]) expect((await fresh(bad)).getState().historyLoading).toBe('scroll');
+    expect((await fresh('all')).getState().historyLoading).toBe('all');
+  });
+
+  it('round-trips through prefs.v1, and the chart env follows setHistoryLoading', async () => {
+    const useStore = await fresh();
+    const env = { current: () => useStore.getState().historyLoading };
+    useStore.getState().setHistoryLoading('all');
+    useStore.getState().flushPersist();
+    expect(JSON.parse(localStorage.getItem('vost.prefs.v1')!).historyLoading).toBe('all');
+    expect(env.current()).toBe('all');
+    // a chart built by the store reads the setting through its env: load-all asks for the saved Bars value
+    const { getProvider } = await import('../lib/providers');
+    const history = vi.spyOn(getProvider('demo'), 'fetchHistory').mockImplementation(async () => []);
+    chartOf(useStore).setState({ providerId: 'demo', symbol: 'DEMO', timeframe: '1h', bars: 321, activeDatasetId: null });
+    await chartOf(useStore).getState().loadData();
+    expect(history).toHaveBeenLastCalledWith(expect.objectContaining({ bars: 321 }));
+    useStore.getState().setHistoryLoading('scroll');
+    await chartOf(useStore).getState().loadData();
+    expect(history).toHaveBeenLastCalledWith(expect.objectContaining({ bars: 1000 }));
+    useStore.getState().flushPersist();
+    vi.restoreAllMocks();
+    vi.resetModules();
+    const again = track((await import('./store')).useStore);
+    again.getState().init();
+    expect(again.getState().historyLoading).toBe('scroll');
+  });
+});
+
+describe('historyLoading reload', () => {
+  async function setup() {
+    vi.resetModules();
+    stubStorage();
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+    const { useStore } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    const { getProvider } = await import('../lib/providers');
+    const history = vi.spyOn(getProvider('demo'), 'fetchHistory').mockImplementation(async () => []);
+    chartOf(useStore).setState({ providerId: 'demo', symbol: 'DEMO', timeframe: '1h', bars: 321, activeDatasetId: null, chartRange: null, replay: null });
+    return { useStore, history };
+  }
+
+  it('saves the choice and reloads a plain Demo chart once; the same value again does nothing', async () => {
+    const { useStore, history } = await setup();
+    useStore.getState().setHistoryLoading('all');
+    useStore.getState().flushPersist();
+    expect(JSON.parse(localStorage.getItem('vost.prefs.v1')!).historyLoading).toBe('all');
+    await vi.waitFor(() => expect(history).toHaveBeenCalledTimes(1));
+    expect(history).toHaveBeenLastCalledWith(expect.objectContaining({ bars: 321 }));
+    useStore.getState().setHistoryLoading('all');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(history).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+
+  it('leaves a chart with a dataset, a chart range or a replay as it is', async () => {
+    for (const patch of [{ activeDatasetId: 'ds1' }, { chartRange: { from: 1_700_000_000, to: 1_700_100_000 } }, { replay: {} }]) {
+      const { useStore, history } = await setup();
+      chartOf(useStore).setState(patch as never);
+      useStore.getState().setHistoryLoading('all');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(history).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('buildTimeframes setting', () => {
+  const bars = Array.from({ length: 5 }, (_, i) => ({ time: 1_700_000_000 + i * 3600, open: 1, high: 2, low: 1, close: 2, volume: 1 }));
+
+  async function setup(timeframe: '1m' | '4h' = '4h', providerId = 'binance') {
+    vi.resetModules();
+    stubStorage();
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+    const { useStore } = await import('./store');
+    track(useStore);
+    const { getProvider } = await import('../lib/providers');
+    const provider = getProvider(providerId);
+    const history = vi.spyOn(provider, 'fetchHistory').mockImplementation(async () => bars);
+    const live: Array<{ source?: string; timeframe: string }> = [];
+    provider.startLive = (o) => {
+      live.push({ source: o.source, timeframe: o.timeframe });
+      return { stop() {} };
+    };
+    chartOf(useStore).setState({ providerId, symbol: 'BTCUSDT', timeframe, bars: 100, activeDatasetId: null });
+    return { useStore, history, live };
+  }
+
+  it('defaults off, is persisted, and a non-boolean reads as off', async () => {
+    const { useStore } = await setup();
+    expect(useStore.getState().buildTimeframes).toBe(false);
+    useStore.getState().setBuildTimeframes(true);
+    useStore.getState().flushPersist();
+    expect(JSON.parse(localStorage.getItem('vost.prefs.v1')!).buildTimeframes).toBe(true);
+    vi.resetModules();
+    localStorage.setItem('vost.prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, buildTimeframes: 'yes' }));
+    const fresh = track((await import('./store')).useStore);
+    fresh.getState().init();
+    expect(fresh.getState().buildTimeframes).toBe(false);
+  });
+
+  it('flipping on a non-lowest timeframe reloads once, with source built, and keeps Live on', async () => {
+    const { useStore, history, live } = await setup('4h');
+    await chartOf(useStore).getState().loadData();
+    chartOf(useStore).getState().setLive(true);
+    history.mockClear();
+    live.length = 0;
+    useStore.getState().setBuildTimeframes(true);
+    await vi.waitFor(() => expect(live).toHaveLength(1));
+    expect(history).toHaveBeenCalledTimes(1);
+    expect(history.mock.calls[0][0]).toMatchObject({ timeframe: '4h', source: 'built' });
+    expect(live[0]).toEqual({ source: 'built', timeframe: '4h' });
+    expect(chartOf(useStore).getState().live).toBe(true);
+    chartOf(useStore).getState().setLive(false);
+  });
+
+  it('flipping on the lowest timeframe only persists', async () => {
+    const { useStore, history } = await setup('1m');
+    useStore.getState().setBuildTimeframes(true);
+    expect(history).not.toHaveBeenCalled();
+    expect(useStore.getState().buildTimeframes).toBe(true);
+  });
+
+  it('flipping on the demo provider or with a CSV dataset only persists', async () => {
+    const demo = await setup('4h', 'demo');
+    demo.useStore.getState().setBuildTimeframes(true);
+    expect(demo.history).not.toHaveBeenCalled();
+    const csv = await setup('4h');
+    chartOf(csv.useStore).setState({ activeDatasetId: 'ds_1' });
+    csv.useStore.getState().setBuildTimeframes(true);
+    expect(csv.history).not.toHaveBeenCalled();
+  });
+
+  it('sends no source with the setting off', async () => {
+    const { useStore, history } = await setup('4h');
+    await chartOf(useStore).getState().loadData();
+    expect(history.mock.calls[0][0]).not.toHaveProperty('source');
+  });
+});
+
+describe('chart registry and flat prefs', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    stubStorage();
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+  });
+
+  // Every key of the saved prefs, all away from its default.
+  const seed = () => ({
+    providerId: 'kraken',
+    symbol: 'XBTUSD',
+    timeframe: '4h',
+    bars: 321,
+    indicators: [{ id: 'seed_sma', kind: 'sma', params: { length: 7 }, color: '#123456', visible: true }],
+    btConfig: { strategyId: 'sma-cross', params: { fast: 3, slow: 9 }, initialCapital: 12345, positionSizePct: 50, feeBps: 7, slippageBps: 3, allowShort: true },
+    showTrades: false,
+    timeZone: 'Asia/Tehran',
+    btRange: { from: 100, to: 200 },
+    sidebarWidth: 333,
+    pineWidth: 444,
+    dockHeight: 255,
+    sidePanel: 'data',
+    sidePanelCollapsed: true,
+    drawingMagnet: true,
+    drawingMagnetStrength: 'strong',
+    drawingsLocked: true,
+    drawingStayMode: true,
+    drawingsHidden: true,
+    drawingDefaults: { trendLine: { width: 3 } },
+    drawingFavorites: ['ray', 'eraser'],
+    drawingLastTool: { lines: 'ray', cursors: 'cursor.dot' },
+    glyphArmed: { emoji: '1f600' },
+    glyphRecent: { emoji: ['1f600'] },
+    cursorKind: 'dot',
+    favoritesBarPos: { x: 120, y: 44 },
+    buildTimeframes: true,
+    historyLoading: 'all',
+    customTimeframes: ['2h'],
+  });
+
+  it('opens with exactly one chart, chart-1, built from the saved prefs', async () => {
+    const prefs = seed();
+    localStorage.setItem('vost.prefs.v1', JSON.stringify(prefs));
+    const { useStore, getActiveChart, FIRST_CHART_ID } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    const app = useStore.getState();
+    expect(FIRST_CHART_ID).toBe('chart-1');
+    expect(Object.keys(app.charts)).toEqual(['chart-1']);
+    expect(app.activeChartId).toBe('chart-1');
+    expect(getActiveChart()).toBe(app.charts['chart-1']);
+    const c = getActiveChart().getState();
+    expect(c.id).toBe('chart-1');
+    expect([c.providerId, c.symbol, c.timeframe, c.bars]).toEqual(['kraken', 'XBTUSD', '4h', 321]);
+    expect(c.indicators).toEqual(prefs.indicators);
+    expect(c.btConfig).toMatchObject(prefs.btConfig);
+    expect(c.showTrades).toBe(false);
+    expect(c.btRange).toEqual({ from: 100, to: 200 });
+    expect(app.timeZone).toBe('Asia/Tehran');
+    expect([app.sidebarWidth, app.pineWidth, app.dockHeight]).toEqual([333, 444, 255]);
+    expect([app.drawingMagnetStrength, app.drawingsLocked, app.drawingStayMode]).toEqual(['strong', true, true]);
+    expect([app.sidePanel, app.sidePanelCollapsed, app.drawingMagnet, app.drawingsHidden, app.buildTimeframes]).toEqual(['data', true, true, true, true]);
+  });
+
+  it('keeps the Pine text inputs of the backtest settings, and old settings without them load as before', async () => {
+    const seeded = { ...seed().btConfig, pineInputs: { Src: 'open', 'Line color': '#00FF0080' } };
+    localStorage.setItem('vost.prefs.v1', JSON.stringify({ ...seed(), btConfig: seeded }));
+    const { useStore, getActiveChart } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    expect(getActiveChart().getState().btConfig).toMatchObject(seeded);
+    getActiveChart().getState().setBtConfig({ pineInputs: { Src: 'hl2' } });
+    expect(getActiveChart().getState().btConfig.pineInputs).toEqual({ Src: 'hl2' });
+  });
+
+  it('old backtest settings load with no pineInputs', async () => {
+    localStorage.setItem('vost.prefs.v1', JSON.stringify(seed()));
+    const { useStore, getActiveChart } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    expect(getActiveChart().getState().btConfig.pineInputs).toBeUndefined();
+  });
+
+  it('reads the drawing rail prefs with sanitising, and old prefs without them load the defaults', async () => {
+    const { useStore } = await import('./store');
+    track(useStore);
+    localStorage.setItem(
+      'vost.prefs.v1',
+      JSON.stringify({ ...seed(), drawingFavorites: ['ray', 'nope', 'ray', 7], drawingLastTool: { lines: 'rectangle', shapes: 'rectangle' }, cursorKind: 'star', favoritesBarPos: { x: 'a', y: 2 } }),
+    );
+    useStore.getState().init();
+    let app = useStore.getState();
+    expect(app.drawingFavorites).toEqual(['ray']);
+    expect(app.drawingLastTool).toEqual({ shapes: 'rectangle' });
+    expect(app.cursorKind).toBe('cross');
+    expect(app.favoritesBarPos).toEqual({ x: 56, y: 12 });
+    const old: Record<string, unknown> = seed();
+    for (const k of ['drawingFavorites', 'drawingLastTool', 'cursorKind', 'favoritesBarPos']) delete old[k];
+    localStorage.setItem('vost.prefs.v1', JSON.stringify(old));
+    useStore.getState().init();
+    app = useStore.getState();
+    expect([app.drawingFavorites, app.drawingLastTool, app.cursorKind, app.favoritesBarPos]).toEqual([[], {}, 'cross', { x: 56, y: 12 }]);
+  });
+
+  it('reads the glyph picks with sanitising: unknown tools and bad ids dropped, recents capped at 16', async () => {
+    const { useStore } = await import('./store');
+    track(useStore);
+    const many = Array.from({ length: 30 }, (_, i) => `g${i}`);
+    localStorage.setItem(
+      'vost.prefs.v1',
+      JSON.stringify({ ...seed(), glyphArmed: { icon: 'star', emoji: 7, sticker: '', ray: 'x' }, glyphRecent: { icon: ['a', 'a', 5, '', 'b'], emoji: many, ray: ['x'], sticker: 'nope' } }),
+    );
+    useStore.getState().init();
+    let app = useStore.getState();
+    expect(app.glyphArmed).toEqual({ icon: 'star' });
+    expect(app.glyphRecent.icon).toEqual(['a', 'b']);
+    expect(app.glyphRecent.emoji).toEqual(many.slice(0, 16));
+    expect(Object.keys(app.glyphRecent).sort()).toEqual(['emoji', 'icon']);
+    const old: Record<string, unknown> = seed();
+    delete old.glyphArmed;
+    delete old.glyphRecent;
+    localStorage.setItem('vost.prefs.v1', JSON.stringify(old));
+    useStore.getState().init();
+    app = useStore.getState();
+    expect([app.glyphArmed, app.glyphRecent]).toEqual([{}, {}]);
+  });
+
+  it('arms a glyph tool and keeps its last 16 picks newest first, once each', async () => {
+    const { useStore } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    const s = useStore.getState();
+    for (let i = 0; i < 20; i++) s.pickGlyph('emoji', `e${i}`);
+    s.pickGlyph('emoji', 'e10');
+    s.pickGlyph('ray', 'nope'); // not a glyph tool
+    const app = useStore.getState();
+    expect(app.glyphArmed).toEqual({ emoji: 'e10' });
+    expect(app.glyphRecent.emoji).toHaveLength(16);
+    expect(app.glyphRecent.emoji.slice(0, 3)).toEqual(['e10', 'e19', 'e18']);
+    expect(app.glyphRecent.ray).toBeUndefined();
+    useStore.getState().flushPersist();
+    expect(JSON.parse(localStorage.getItem('vost.prefs.v1')!).glyphArmed).toEqual({ emoji: 'e10' });
+  });
+
+  it('toggles favourites and remembers the last tool of a family', async () => {
+    const { useStore } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    const s = useStore.getState();
+    s.toggleDrawingFavorite('ray');
+    s.toggleDrawingFavorite('trendLine');
+    s.toggleDrawingFavorite('bogus');
+    expect(useStore.getState().drawingFavorites).toEqual(['ray', 'trendLine']);
+    s.toggleDrawingFavorite('ray');
+    expect(useStore.getState().drawingFavorites).toEqual(['trendLine']);
+    s.setDrawingLastTool('lines', 'ray');
+    s.setDrawingLastTool('lines', 'rectangle'); // not in the family: dropped
+    expect(useStore.getState().drawingLastTool).toEqual({ lines: 'ray' });
+  });
+
+  it('writes prefs.v1 back flat with the same keys, from the chart and the app together', async () => {
+    const prefs = seed();
+    localStorage.setItem('vost.prefs.v1', JSON.stringify(prefs));
+    const { useStore, getActiveChart } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    getActiveChart().getState().setBars(77); // a chart field
+    useStore.getState().setDockHeight(260); // an app field
+    useStore.getState().flushPersist();
+    const saved = JSON.parse(localStorage.getItem('vost.prefs.v1')!);
+    expect(Object.keys(saved).sort()).toEqual(Object.keys(prefs).sort());
+    expect(saved.bars).toBe(77);
+    expect(saved.dockHeight).toBe(260);
+    // an older build, compare.ts and the e2e seeds read these straight off the top level
+    expect(saved.indicators).toEqual(prefs.indicators);
+    expect(saved.providerId).toBe('kraken');
+    expect(saved.timeZone).toBe('Asia/Tehran');
+    expect(saved.buildTimeframes).toBe(true);
+    expect(saved.drawingFavorites).toEqual(['ray', 'eraser']);
+    expect(saved.drawingLastTool).toEqual({ lines: 'ray', cursors: 'cursor.dot' });
+    expect(saved.cursorKind).toBe('dot');
+    expect(saved.glyphArmed).toEqual({ emoji: '1f600' });
+    expect(saved.favoritesBarPos).toEqual({ x: 120, y: 44 });
+    for (const v of Object.values(saved)) expect(v).not.toHaveProperty('candles');
+  });
+
+  it('setBuildTimeframes reloads every chart whose source changes and no other', async () => {
+    const { useStore, getActiveChart } = await import('./store');
+    const { createChartStore, defaultChartInitial } = await import('./chart');
+    const { getProvider } = await import('../lib/providers');
+    track(useStore);
+    const bars = Array.from({ length: 5 }, (_, i) => ({ time: 1_700_000_000 + i * 3600, open: 1, high: 2, low: 1, close: 2, volume: 1 }));
+    const history = vi.spyOn(getProvider('binance'), 'fetchHistory').mockImplementation(async () => bars);
+    vi.spyOn(getProvider('binance') as Required<ReturnType<typeof getProvider>>, 'startLive').mockImplementation(() => ({ stop() {} }) as never); // charts load live by default: no real socket
+    const first = getActiveChart();
+    first.setState({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '4h', bars: 100 });
+    // a second chart in the registry: on the lowest timeframe, so the setting does not change its source
+    const second = createChartStore('chart-2', { ...defaultChartInitial(), providerId: 'binance', symbol: 'ETHUSDT', timeframe: '1m', bars: 100 }, {
+      pushToast: () => {},
+      pushMessage: () => {},
+      timeZone: () => 'UTC',
+      buildTimeframes: () => useStore.getState().buildTimeframes,
+      historyLoading: () => useStore.getState().historyLoading,
+      datasets: () => [],
+      addDataset: () => {},
+      removeDataset: () => {},
+      onPrefsChange: () => {},
+      onSync: () => {},
+    });
+    useStore.setState({ charts: { ...useStore.getState().charts, 'chart-2': second } });
+    useStore.getState().setBuildTimeframes(true);
+    await vi.waitFor(() => expect(history).toHaveBeenCalledTimes(1));
+    expect(history.mock.calls[0][0]).toMatchObject({ symbol: 'BTCUSDT', timeframe: '4h', source: 'built' });
+    expect(first.getState().candles).toHaveLength(5);
+    expect(second.getState().candles).toEqual([]);
+    // a second chart on a built timeframe reloads too
+    second.setState({ timeframe: '4h' });
+    history.mockClear();
+    useStore.getState().setBuildTimeframes(false);
+    await vi.waitFor(() => expect(history).toHaveBeenCalledTimes(2));
+    expect(history.mock.calls.map((c) => c[0].symbol).sort()).toEqual(['BTCUSDT', 'ETHUSDT']);
+    expect(history.mock.calls.every((c) => !('source' in c[0]))).toBe(true);
+  });
+
+  it('openPineEditor selects the indicator on the active chart only', async () => {
+    const { useStore, getActiveChart } = await import('./store');
+    track(useStore);
+    getActiveChart().setState({ selectedPineId: null });
+    useStore.getState().openPineEditor('ind_x');
+    expect(useStore.getState().pineOpen).toBe(true);
+    expect(getActiveChart().getState().selectedPineId).toBe('ind_x');
+  });
+
+  it('addSymbolToWatchlist uses the active chart provider and loadSymbolCatalog takes the provider', async () => {
+    const { useStore, getActiveChart } = await import('./store');
+    const { getProvider } = await import('../lib/providers');
+    track(useStore);
+    getActiveChart().setState({ providerId: 'kraken' });
+    useStore.getState().addSymbolToWatchlist({ symbol: 'ZZZ', label: 'ZZZ' });
+    const items = useStore.getState().watchlists.lists.flatMap((l) => l.sections.flatMap((s) => s.items));
+    expect(items.find((i) => i.symbol === 'ZZZ')?.providerId).toBe('kraken');
+    const bybit = getProvider('bybit');
+    bybit.listSymbols = async () => [{ symbol: 'QQQ', label: 'QQQ' }];
+    await useStore.getState().loadSymbolCatalog('bybit');
+    expect(useStore.getState().symbolCatalog.bybit).toEqual([{ symbol: 'QQQ', label: 'QQQ' }]);
+  });
+});
+
+describe('custom timeframes', () => {
+  beforeEach(() => {
+    vi.resetModules();
+    stubStorage();
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+  });
+  const saved = () => JSON.parse(localStorage.getItem('vost.prefs.v1')!);
+  const base = { providerId: 'coinbase', symbol: 'BTC-USD', timeframe: '1h', bars: 100 };
+  async function fresh() {
+    const { useStore } = await import('./store');
+    track(useStore);
+    useStore.getState().init();
+    return useStore;
+  }
+
+  it('adds canonical intervals once, persists them and a fresh store restores them', async () => {
+    vi.useFakeTimers();
+    const useStore = await fresh();
+    useStore.getState().addCustomTimeframe('2h');
+    useStore.getState().addCustomTimeframe('2h');
+    useStore.getState().addCustomTimeframe('10m');
+    vi.advanceTimersByTime(1000);
+    expect(saved().customTimeframes).toEqual(['2h', '10m']);
+    vi.resetModules();
+    const again = await fresh();
+    expect(again.getState().customTimeframes).toEqual(['2h', '10m']);
+  });
+
+  it('stops at 20', async () => {
+    const useStore = await fresh();
+    for (let i = 2; i < 30; i++) useStore.getState().addCustomTimeframe(`${i}m`);
+    expect(useStore.getState().customTimeframes).toHaveLength(20);
+  });
+
+  it('restores a chart left on a custom interval', async () => {
+    localStorage.setItem('vost.prefs.v1', JSON.stringify({ ...base, timeframe: '2h', customTimeframes: ['2h'] }));
+    const useStore = await fresh();
+    expect(chartOf(useStore).getState().timeframe).toBe('2h');
+  });
+
+  it('drops bad saved lists and a bad saved timeframe without a toast', async () => {
+    for (const bad of ['2h', [1, '120m', 'x'], Array.from({ length: 30 }, (_, i) => `${i + 2}m`)]) {
+      localStorage.setItem('vost.prefs.v1', JSON.stringify({ ...base, timeframe: '120m', customTimeframes: bad }));
+      vi.resetModules();
+      const useStore = await fresh();
+      expect(useStore.getState().customTimeframes.length).toBe(Array.isArray(bad) && bad.length === 30 ? 20 : 0);
+      expect(chartOf(useStore).getState().timeframe).toBe('1h');
+      expect(useStore.getState().toasts).toEqual([]);
+    }
+  });
+
+  it('removing the active interval moves the chart to the provider default', async () => {
+    localStorage.setItem('vost.prefs.v1', JSON.stringify({ ...base, timeframe: '2h', customTimeframes: ['2h'] }));
+    const useStore = await fresh();
+    useStore.getState().removeCustomTimeframe('2h');
+    expect(useStore.getState().customTimeframes).toEqual([]);
+    expect(chartOf(useStore).getState().timeframe).toBe('1h');
   });
 });

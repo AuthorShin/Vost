@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react';
 import { CUSTOM_STRATEGY_EXAMPLES, DEFAULT_CUSTOM_CODE } from '../lib/backtest/custom';
 import { PINE_STRATEGY_EXAMPLES, DEFAULT_PINE_CODE } from '../lib/pine/examples';
-import type { PineInput } from '../lib/pine/types';
+import type { PineInput, PineInputValue } from '../lib/pine/types';
+import { isTextInput } from '../lib/pine/inputs';
+import type { BacktestConfig } from '../lib/backtest/types';
+import { PineInputList } from './PineInputControl';
 import { getStrategy, strategies } from '../lib/backtest/strategies';
+import { BacktestProgress } from './BacktestProgress';
 import { PineConvert } from './PineConvert';
 import { PineEditor } from './PineEditor';
 import { messageToError } from '../lib/pine/language';
@@ -10,26 +14,30 @@ import { fmtNum, fmtTime } from '../lib/format';
 import { describeTimeRange, timeRangeErrorText } from '../lib/timeRange';
 import { TimeRangePicker } from './TimeRangePicker';
 import { useStore } from '../state/store';
+import { runNeedsHistoryOf, selectBars } from '../state/chart';
+import { useChart } from '../state/chartContext';
 
 export function BacktestTab() {
-  const btConfig = useStore((s) => s.btConfig);
-  const btRunning = useStore((s) => s.btRunning);
-  const btError = useStore((s) => s.btError);
-  const candles = useStore((s) => s.candles);
-  const setBtConfig = useStore((s) => s.setBtConfig);
-  const runBacktest = useStore((s) => s.runBacktest);
+  const btConfig = useChart((s) => s.btConfig);
+  const btRunning = useChart((s) => s.btRunning);
+  const btError = useChart((s) => s.btError);
+  const candles = useChart(selectBars);
+  const setBtConfig = useChart((s) => s.setBtConfig);
+  const runBacktest = useChart((s) => s.runBacktest);
   const pushToast = useStore((s) => s.pushToast);
-  const pineInputs = useStore((s) => s.pineInputs);
-  const refreshPineInputs = useStore((s) => s.refreshPineInputs);
-  const btResult = useStore((s) => s.btResult);
-  const btRange = useStore((s) => s.btRange);
-  const setBtRange = useStore((s) => s.setBtRange);
+  const pineInputs = useChart((s) => s.pineInputs);
+  const refreshPineInputs = useChart((s) => s.refreshPineInputs);
+  const btResult = useChart((s) => s.btResult);
+  const btRange = useChart((s) => s.btRange);
+  const setBtRange = useChart((s) => s.setBtRange);
   const timeZone = useStore((s) => s.timeZone);
 
   const strategy = getStrategy(btConfig.strategyId);
 
   const isPine = !!strategy.pine;
 
+  const historyLoading = useStore((s) => s.historyLoading);
+  const needsHistory = useChart((s) => runNeedsHistoryOf(s, historyLoading, btRange));
   const range = describeTimeRange(candles, btRange);
   const hasData = candles.length >= 3;
   const rangeSet = btRange.from != null || btRange.to != null;
@@ -37,14 +45,18 @@ export function BacktestTab() {
   const hint = (() => {
     if (!hasData) return 'Load data first (provider above or CSV import).';
     const tail = "signals execute at the next bar's open · fees & slippage applied";
-    if (range.error === 'too-few-bars') return `Fewer than 3 bars in range · ${fmtNum(range.total, 0)} bars loaded · ${tail}`;
+    if (range.error === 'too-few-bars' && !needsHistory) return `Fewer than 3 bars in range · ${fmtNum(range.total, 0)} bars loaded · ${tail}`;
     const count = rangeSet ? `${fmtNum(range.count, 0)} of ${fmtNum(range.total, 0)} bars` : `${fmtNum(range.total, 0)} bars`;
     const span =
       range.count > 0
         ? ` · ${fmtTime(inRange[0].time, { timeZone })} → ${fmtTime(inRange[inRange.length - 1].time, { timeZone })}`
         : '';
     const clips = [
-      range.clippedStart ? 'range starts before the data, using the first bar' : '',
+      range.clippedStart
+        ? needsHistory
+          ? 'range starts before the loaded bars, older history loads on run'
+          : 'range starts before the data, using the first bar'
+        : '',
       range.clippedEnd ? 'range ends after the data, using the last bar' : '',
     ].filter(Boolean);
     return `${count}${span}${clips.length ? ` · ${clips.join(' · ')}` : ''} · ${tail}`;
@@ -59,6 +71,11 @@ export function BacktestTab() {
   const setParam = (key: string, value: number) => {
     setBtConfig({ params: { ...btConfig.params, [key]: value } });
   };
+  /** Text values go to `pineInputs`, numbers (and bools as 0/1) to `params`. */
+  const setPineInput = (input: PineInput, v: PineInputValue) => {
+    if (isTextInput(input)) setBtConfig({ pineInputs: { ...btConfig.pineInputs, [input.name]: String(v) } });
+    else setParam(input.name, typeof v === 'boolean' ? (v ? 1 : 0) : Number(v));
+  };
 
   return (
     <div>
@@ -70,7 +87,7 @@ export function BacktestTab() {
             onChange={(e) => {
               const next = getStrategy(e.target.value);
               const params = Object.fromEntries(next.params.map((p) => [p.key, p.default]));
-              setBtConfig({ strategyId: next.id, params, ...(next.pine && btConfig.pineCode === undefined && { pineCode: DEFAULT_PINE_CODE }) });
+              setBtConfig({ strategyId: next.id, params, ...(btConfig.pineInputs && { pineInputs: undefined }), ...(next.pine && btConfig.pineCode === undefined && { pineCode: DEFAULT_PINE_CODE }) });
             }}
           >
             {strategies.map((s) => (
@@ -80,8 +97,6 @@ export function BacktestTab() {
             ))}
           </select>
         </label>
-
-        {isPine && pineInputs.filter(isTunable).map((i) => <PineInputField key={i.name} input={i} value={btConfig.params[i.name]} onChange={(v) => setParam(i.name, v)} />)}
 
         {strategy.params.map((p) =>
           p.type === 'select' ? (
@@ -189,6 +204,18 @@ export function BacktestTab() {
         </div>
       )}
 
+      {isPine && pineInputs.length > 0 && (
+        <div className="mt-3">
+          <div className="section-title">Script inputs</div>
+          <PineInputList
+            className="bt-pine-inputs"
+            inputs={pineInputs}
+            valueOf={(i) => inputValue(i, btConfig)}
+            onChange={(i, v) => setPineInput(i, v)}
+          />
+        </div>
+      )}
+
       {isPine && (
         <div className="mt-3">
           <PineCodeEditor
@@ -210,7 +237,7 @@ export function BacktestTab() {
       </div>
 
       <div className="row mt-3 wrap">
-        <button className="primary" disabled={btRunning || !hasData || range.error != null} onClick={() => void runBacktest()}>
+        <button className="primary" disabled={btRunning || !hasData || (range.error != null && !(range.error === 'too-few-bars' && needsHistory))} onClick={() => void runBacktest()}>
           {btRunning ? (
             <>
               <span className="spinner" style={{ marginRight: 8 }} />
@@ -224,6 +251,12 @@ export function BacktestTab() {
           {hint}
         </span>
       </div>
+
+      {btRunning && (
+        <div className="mt-2">
+          <BacktestProgress />
+        </div>
+      )}
 
       {btError && (
         <div className="mt-2" style={{ color: 'var(--red)', fontSize: 12.5 }}>
@@ -319,40 +352,12 @@ function CustomParamsEditor({ params, onChange }: { params: Record<string, numbe
   );
 }
 
-function isTunable(i: PineInput): boolean {
-  return i.type === 'int' || i.type === 'float' || i.type === 'bool';
-}
-
-function PineInputField({ input, value, onChange }: { input: PineInput; value: number | undefined; onChange: (v: number) => void }) {
-  const def = typeof input.defval === 'number' ? input.defval : input.defval === true ? 1 : 0;
-  const current = value ?? def;
-  if (input.type === 'bool') {
-    return (
-      <label className="form-field">
-        <span>{input.name}</span>
-        <select value={current ? 'yes' : 'no'} onChange={(e) => onChange(e.target.value === 'yes' ? 1 : 0)}>
-          <option value="yes">On</option>
-          <option value="no">Off</option>
-        </select>
-      </label>
-    );
-  }
-  return (
-    <label className="form-field">
-      <span>{input.name}</span>
-      <input
-        type="number"
-        value={current}
-        min={input.minval}
-        max={input.maxval}
-        step={input.step ?? (input.type === 'int' ? 1 : 0.1)}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (Number.isFinite(v)) onChange(v);
-        }}
-      />
-    </label>
-  );
+/** The value a Pine input shows in the Backtest pane: the saved one, else the script's default. */
+function inputValue(input: PineInput, config: BacktestConfig): PineInputValue | null {
+  if (isTextInput(input)) return config.pineInputs?.[input.name] ?? input.defval;
+  const n = config.params[input.name];
+  if (n === undefined) return input.defval;
+  return input.type === 'bool' ? n !== 0 : n;
 }
 
 function PineCodeEditor({

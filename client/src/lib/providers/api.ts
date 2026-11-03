@@ -6,12 +6,22 @@
 import type { ApiError, Candle, ProviderInfo, SymbolSuggestion } from '../../../../shared/market.ts';
 import type { HistoryRequest } from './http';
 
+/** A failed `/api/*` call: the message is the server's own text (or `HTTP <status>`); `status` is the HTTP status. */
+export class ApiHttpError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiHttpError';
+    this.status = status;
+  }
+}
+
 async function getJson<T>(path: string, params: Record<string, string | number>, signal?: AbortSignal): Promise<T> {
   const qs = new URLSearchParams(Object.entries(params).map(([k, v]) => [k, String(v)])).toString();
   const res = await fetch(`/api/${path}?${qs}`, { signal });
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as Partial<ApiError> | null;
-    throw new Error(typeof body?.error === 'string' && body.error ? body.error : `HTTP ${res.status}`);
+    throw new ApiHttpError(typeof body?.error === 'string' && body.error ? body.error : `HTTP ${res.status}`, res.status);
   }
   return (await res.json()) as T;
 }
@@ -20,6 +30,7 @@ export function fetchHistoryApi(provider: string, req: HistoryRequest, signal?: 
   const params: Record<string, string | number> = { provider, symbol: req.symbol, timeframe: req.timeframe, bars: req.bars };
   if (req.from != null) params.from = req.from;
   if (req.to != null) params.to = req.to;
+  if (req.source === 'built') params.source = 'built';
   return getJson<Candle[]>('history', params, signal);
 }
 

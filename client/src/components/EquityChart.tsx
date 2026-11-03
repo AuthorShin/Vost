@@ -1,7 +1,10 @@
+import { DOWN_COLOR, UP_COLOR, chartTheme } from '../lib/theme';
+import { MetricTip } from './MetricTip';
 import {
   AreaSeries,
   ColorType,
   HistogramSeries,
+  LineSeries,
   LineStyle,
   createChart,
   type Time,
@@ -9,7 +12,7 @@ import {
   type IChartApi,
 } from 'lightweight-charts';
 import { useEffect, useRef } from 'react';
-import { fmtTime } from '../lib/format';
+import { fmtMoney, fmtTime } from '../lib/format';
 import { fmtTick } from '../lib/time';
 import { useStore } from '../state/store';
 import type { BacktestResult } from '../lib/backtest/types';
@@ -23,22 +26,22 @@ export function EquityChart({ result }: { result: BacktestResult }) {
     const el = ref.current;
     if (!el) return;
     const positive = result.metrics.totalReturnPct >= 0;
-    const mainColor = positive ? '#22c55e' : '#ef4444';
+    const mainColor = positive ? UP_COLOR : DOWN_COLOR;
 
     const chart = createChart(el, {
       autoSize: true,
       layout: {
         background: { type: ColorType.Solid, color: 'transparent' },
-        textColor: '#8b94a7',
+        textColor: chartTheme.text,
         fontSize: 10,
       },
       grid: {
-        vertLines: { color: 'rgba(255,255,255,0.03)' },
-        horzLines: { color: 'rgba(255,255,255,0.03)' },
+        vertLines: { color: chartTheme.gridFaint },
+        horzLines: { color: chartTheme.gridFaint },
       },
-      rightPriceScale: { borderColor: '#1e2433' },
+      rightPriceScale: { borderColor: chartTheme.scaleBorder },
       timeScale: {
-        borderColor: '#1e2433',
+        borderColor: chartTheme.scaleBorder,
         timeVisible: true,
         secondsVisible: false,
         tickMarkFormatter: (t: Time, type: number) => fmtTick(t as number, type, useStore.getState().timeZone),
@@ -46,7 +49,7 @@ export function EquityChart({ result }: { result: BacktestResult }) {
       localization: {
         timeFormatter: (t: Time) => fmtTime(t as number, { timeZone: useStore.getState().timeZone }),
       },
-      crosshair: { vertLine: { color: 'rgba(139,148,167,0.4)' }, horzLine: { color: 'rgba(139,148,167,0.4)' } },
+      crosshair: { vertLine: { color: chartTheme.crosshairFaint }, horzLine: { color: chartTheme.crosshairFaint } },
     });
 
     const equitySeries = chart.addSeries(AreaSeries, {
@@ -60,9 +63,17 @@ export function EquityChart({ result }: { result: BacktestResult }) {
     equitySeries.setData(
       result.equity.map((p) => ({ time: p.time as UTCTimestamp, value: p.equity })),
     );
+    const holdSeries = chart.addSeries(LineSeries, {
+      color: chartTheme.benchmark,
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: true,
+    });
+    holdSeries.setData(result.equity.map((p, i) => ({ time: p.time as UTCTimestamp, value: result.buyHold[i] })));
     equitySeries.createPriceLine({
       price: result.metrics.initialCapital,
-      color: 'rgba(139,148,167,0.7)',
+      color: chartTheme.refLine,
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
       axisLabelVisible: true,
@@ -102,5 +113,21 @@ export function EquityChart({ result }: { result: BacktestResult }) {
     });
   }, [timeZone, result]);
 
-  return <div ref={ref} style={{ height: 240, width: '100%' }} />;
+  const positive = result.metrics.totalReturnPct >= 0;
+  const holdFinal = result.buyHold.length > 0 ? result.buyHold[result.buyHold.length - 1] : result.metrics.initialCapital;
+  return (
+    <div>
+      <div className="equity-legend">
+        <MetricTip help="legendStrategy" className="equity-legend-item">
+          <span className="equity-swatch" style={{ background: positive ? UP_COLOR : DOWN_COLOR }} />
+          Strategy <b className="mono">{fmtMoney(result.metrics.finalEquity)}</b>
+        </MetricTip>
+        <MetricTip help="legendBuyHold" className="equity-legend-item">
+          <span className="equity-swatch dashed" style={{ borderTopColor: chartTheme.benchmark }} />
+          Buy &amp; hold <b className="mono">{fmtMoney(holdFinal)}</b>
+        </MetricTip>
+      </div>
+      <div ref={ref} style={{ height: 240, width: '100%' }} />
+    </div>
+  );
 }

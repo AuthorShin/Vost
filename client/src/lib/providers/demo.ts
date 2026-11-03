@@ -2,24 +2,14 @@
  * Synthetic offline dataset — a deterministic random walk with volatility
  * clustering. Great for trying charts and backtests with zero network access.
  */
-import type { Candle, Timeframe } from '../../types';
-import { MAX_BARS, TIMEFRAME_SECONDS, rangeBarCount } from '../../../../shared/market.ts';
+import type { Candle, Interval } from '../../types';
+import { MAX_BARS, intervalSeconds, rangeBarCount } from '../../../../shared/market.ts';
+import { mulberry32 } from '../random.ts';
 import type { DataProvider, HistoryRequest, SymbolSuggestion } from './http';
-
-function mulberry32(seed: number) {
-  let a = seed >>> 0;
-  return () => {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
 
 export function generateDemoCandles(opts: {
   bars?: number;
-  timeframe?: Timeframe;
+  timeframe?: Interval;
   seed?: number;
   startPrice?: number;
   /** Unix seconds of the last bar's slot (floored to the timeframe); defaults to now. */
@@ -28,7 +18,7 @@ export function generateDemoCandles(opts: {
   start?: number;
 }): Candle[] {
   const tf = opts.timeframe ?? '1d';
-  const step = TIMEFRAME_SECONDS[tf];
+  const step = intervalSeconds(tf);
   const rand = mulberry32(opts.seed ?? 1337);
   const now = Math.floor(Date.now() / 1000);
   const end = Math.floor((opts.end ?? now) / step) * step;

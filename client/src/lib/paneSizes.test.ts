@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   DRAWER_MAX_WIDTH, DRAWER_QUERY, isDrawerWidth, topbarTier,
-  CHART_MIN_HEIGHT, DOCK_COLLAPSE_BELOW, DOCK_DEFAULT, DOCK_MIN, SIDEBAR_DEFAULT, TOPBAR_HEIGHT,
-  clamp, dockLimits, resolveDockResize, sanitizeStoredSize, shouldCollapseDock, sidebarLimits, step,
+  CHART_BAR_HEIGHT, CHART_MIN_HEIGHT, DOCK_COLLAPSE_BELOW, DOCK_DEFAULT, DOCK_MIN, SIDEBAR_DEFAULT, TOPBAR_HEIGHT,
+  CHART_MIN_WIDTH, PINE_MIN, RAIL_WIDTH, pineLimits,
+  clamp, dockLimits, dragDelta, resolveDockResize, sanitizeStoredSize, shouldCollapseDock, sidebarLimits, step,
 } from './paneSizes';
 
 describe('sidebarLimits', () => {
@@ -20,14 +21,28 @@ describe('sidebarLimits', () => {
   });
 });
 
+describe('pineLimits', () => {
+  it('keeps the chart at CHART_MIN_WIDTH at 1280px with and without the sidebar', () => {
+    for (const sb of [0, 264, 512]) {
+      const l = pineLimits(1280, sb);
+      expect(1280 - sb - RAIL_WIDTH - l.max).toBeGreaterThanOrEqual(CHART_MIN_WIDTH);
+    }
+    expect(pineLimits(1280, 264).max).toBe(616);
+    expect(pineLimits(1280, 0).max).toBe(880);
+  });
+  it('never goes below PINE_MIN on a small viewport', () => {
+    expect(pineLimits(500, 264)).toEqual({ min: PINE_MIN, max: PINE_MIN });
+  });
+});
+
 describe('dockLimits', () => {
   it('keeps 200px of chart on 720px and 600px viewports', () => {
     for (const h of [720, 600, 900]) {
       const l = dockLimits(h);
-      expect(h - TOPBAR_HEIGHT - l.max).toBeGreaterThanOrEqual(CHART_MIN_HEIGHT);
+      expect(h - TOPBAR_HEIGHT - CHART_BAR_HEIGHT - l.max).toBeGreaterThanOrEqual(CHART_MIN_HEIGHT);
     }
-    expect(dockLimits(720).max).toBe(471);
-    expect(dockLimits(600).max).toBe(351);
+    expect(dockLimits(720).max).toBe(450);
+    expect(dockLimits(600).max).toBe(330);
   });
   it('never goes below the tab strip', () => {
     expect(dockLimits(100)).toEqual({ min: DOCK_MIN, max: DOCK_MIN });
@@ -52,6 +67,38 @@ describe('step', () => {
   });
   it('ignores other keys', () => {
     expect(step(300, 'a', false, l)).toBeNull();
+  });
+});
+
+describe("step with grow 'start'", () => {
+  const l = { min: 200, max: 500 };
+  it('ArrowLeft grows and ArrowRight shrinks, Shift steps 64', () => {
+    expect(step(300, 'ArrowLeft', false, l, 'start')).toBe(316);
+    expect(step(300, 'ArrowRight', false, l, 'start')).toBe(284);
+    expect(step(300, 'ArrowLeft', true, l, 'start')).toBe(364);
+    expect(step(300, 'ArrowRight', true, l, 'start')).toBe(236);
+  });
+  it('keeps vertical arrows, Home and End', () => {
+    expect(step(300, 'ArrowUp', false, l, 'start')).toBe(316);
+    expect(step(300, 'ArrowDown', false, l, 'start')).toBe(284);
+    expect(step(300, 'Home', false, l, 'start')).toBe(200);
+    expect(step(300, 'End', false, l, 'start')).toBe(500);
+  });
+  it("leaves the default 'end' unchanged", () => {
+    expect(step(300, 'ArrowRight', false, l, 'end')).toBe(316);
+  });
+});
+
+describe('dragDelta', () => {
+  it("grow 'start': a drag of -80px grows by 80, +80 shrinks", () => {
+    expect(dragDelta('vertical', 'start', -80, 5)).toBe(80);
+    expect(dragDelta('vertical', 'start', 80, 5)).toBe(-80);
+  });
+  it("grow 'end': follows x", () => {
+    expect(dragDelta('vertical', 'end', 80, 5)).toBe(80);
+  });
+  it('horizontal grows upward whatever the grow', () => {
+    expect(dragDelta('horizontal', 'end', 5, -40)).toBe(40);
   });
 });
 
@@ -115,11 +162,12 @@ describe('drawer breakpoint', () => {
 describe('topbarTier', () => {
   it('switches at each boundary (inclusive on the narrower side)', () => {
     expect(topbarTier(1920)).toBe('full');
-    expect(topbarTier(1281)).toBe('full');
-    expect(topbarTier(1280)).toBe('compact');
-    expect(topbarTier(1024)).toBe('compact');
-    expect(topbarTier(961)).toBe('compact');
-    expect(topbarTier(960)).toBe('narrow');
+    expect(topbarTier(1601)).toBe('full');
+    expect(topbarTier(1600)).toBe('compact');
+    expect(topbarTier(1440)).toBe('compact');
+    expect(topbarTier(1024)).toBe('narrow');
+    expect(topbarTier(1161)).toBe('compact');
+    expect(topbarTier(1160)).toBe('narrow');
     expect(topbarTier(768)).toBe('narrow');
     expect(topbarTier(601)).toBe('narrow');
     expect(topbarTier(600)).toBe('tiny');

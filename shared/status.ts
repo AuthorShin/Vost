@@ -33,17 +33,40 @@ export interface StatusResponse {
   checks: StatusCheck[];
   /** Only on `?refresh=1`: true when this call ran a round, false when it joined or reused one. */
   refreshed?: boolean;
+  /** The server's on-disk candle store; absent when the server has none. */
+  candles?: { on: boolean; series: number; rows: number; bytes: number };
+  /** The markets the server records; absent when the server has no recorder. */
+  recorder?: RecorderStatus;
 }
 
-/** Providers whose symbol lookup is built in (no remote call to check). */
-const LOCAL_SYMBOLS = new Set(['stooq']);
+export interface RecorderSeriesStatus {
+  provider: string;
+  symbol: string;
+  timeframe: string;
+  /** The live feed's status: connecting, live, reconnecting or error. */
+  live: string;
+  /** Unix seconds of the newest stored closed bar, or null. */
+  lastCandleTime: number | null;
+  /** Bars in the depth window the store does not cover yet. */
+  missingBars: number;
+  /** Fills done since the server started. */
+  refills: number;
+  /** Unix ms of the last fill, or null. */
+  lastRefillAt: number | null;
+  lastError: string | null;
+}
+
+export interface RecorderStatus {
+  on: boolean;
+  depthBars: number;
+  series: RecorderSeriesStatus[];
+}
 
 /** The feeds Vost checks for a provider, derived from the catalog. */
 export function statusFeeds(provider: string): StatusFeed[] {
   const info = PROVIDER_CATALOG.find((p) => p.id === provider);
   if (!info) return [];
-  const feeds: StatusFeed[] = ['history'];
-  if (!LOCAL_SYMBOLS.has(provider)) feeds.push('symbols');
+  const feeds: StatusFeed[] = ['history', 'symbols'];
   if (info.supportsLive) feeds.push('live');
   return feeds;
 }

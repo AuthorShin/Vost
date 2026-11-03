@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Locator, Page } from 'playwright';
 import type { Scenario } from '../scenario.ts';
+import { showSideSection } from '../side-panel.ts';
 
 /**
  * The UI audit (docs/spikes/ui-audit/README.md). It drives every pane, records what it sees and writes the
@@ -395,6 +396,13 @@ export const uiAudit: Scenario = {
     // ---- live on / off / on --------------------------------------------------------------------------------------
     await ctx.step('live on, off, on again', async () => {
       await snap('before live');
+      await act('live off (start)', async () => {
+        // charts open live: turn it off first so each "live on" below really starts the stream
+        if (narrow) await openMore();
+        await liveButton.first().click();
+        if (narrow) await page.keyboard.press('Escape');
+        await settle(400);
+      });
       for (let i = 0; i < 3; i++) {
         await act(`live on #${i + 1}`, async () => {
           if (narrow) await openMore();
@@ -441,12 +449,9 @@ export const uiAudit: Scenario = {
     // ---- CSV import ----------------------------------------------------------------------------------------------
     const csvText = await readFile(path.join(EXAMPLES, 'sample-daily.csv'), 'utf8');
     const openCsv = async (): Promise<void> => {
-      if (narrow) {
-        await openMore();
-        await page.getByRole('button', { name: /Import CSV/ }).first().click();
-      } else {
-        await page.locator('.topbar').getByRole('button', { name: /Import CSV/ }).click();
-      }
+      // Import CSV sits in the More menu below 1601px, which covers the 1440px desktop capture too.
+      await openMore();
+      await page.getByRole('button', { name: /Import CSV/ }).first().click();
       await page.locator('.modal').waitFor();
     };
     await ctx.step('CSV import from examples/', async () => {
@@ -523,21 +528,14 @@ export const uiAudit: Scenario = {
       notes.states.push('empty Results / Optimizer states are covered by code-read (see README)');
     });
 
-    // ---- Pine tab ------------------------------------------------------------------------------------------------
-    await ctx.step('Pine tab: add, type an error, remove', async () => {
+    // ---- Pine pane -----------------------------------------------------------------------------------------------
+    await ctx.step('Pine pane: add, type an error, remove', async () => {
       await snap('before Pine');
       await act('pine add', async () => {
-        if (narrow) {
-          await page.getByRole('button', { name: 'Toggle sidebar' }).click();
-          await page.getByRole('dialog', { name: 'Sidebar' }).waitFor();
-        }
+        await showSideSection(page, 'Indicators', narrow);
         await page.locator('#add-indicator-select').selectOption('pine');
-        if (narrow) {
-          // the add closes nothing: the editor opens in the dock behind the drawer
-          await page.keyboard.press('Escape');
-          await page.getByRole('dialog', { name: 'Sidebar' }).waitFor({ state: 'detached' });
-        }
-        await page.locator('.pine-editor .cm-content').waitFor();
+        // the add closes the narrow drawer and opens the Pine editor pane (a dialog on narrow)
+        await page.locator('.pine-pane .pine-editor .cm-content').waitFor();
       });
       await ctx.screenshot('pine');
       await act('pine error', async () => {
@@ -546,12 +544,9 @@ export const uiAudit: Scenario = {
         await page.keyboard.type('\nplot(1 +');
         await page.locator('.pine-error').waitFor();
       });
-      await scan('pine tab');
+      await scan('pine pane');
       await act('pine remove', async () => {
-        if (narrow) {
-          await page.getByRole('button', { name: 'Toggle sidebar' }).click();
-          await page.getByRole('dialog', { name: 'Sidebar' }).waitFor();
-        }
+        await showSideSection(page, 'Indicators', narrow);
         await page.getByTitle('Remove').last().click();
         if (narrow) {
           await page.keyboard.press('Escape');
@@ -644,9 +639,10 @@ export const uiAudit: Scenario = {
     });
     await ctx.step('drawer and More menu cycles with Esc', async () => {
       if (!narrow) return;
+      const railButton = page.getByRole('toolbar', { name: 'Side panel' }).getByRole('button', { name: 'Watchlist', exact: true });
       await snap('before drawer cycles');
       for (let i = 0; i < 5; i++) {
-        await page.getByRole('button', { name: 'Toggle sidebar' }).click();
+        await railButton.click();
         await page.getByRole('dialog', { name: 'Sidebar' }).waitFor();
         await page.keyboard.press('Escape');
         await page.getByRole('dialog', { name: 'Sidebar' }).waitFor({ state: 'detached' });
@@ -655,12 +651,13 @@ export const uiAudit: Scenario = {
         await page.getByRole('dialog', { name: 'More' }).waitFor({ state: 'detached' });
       }
       await snap('after 5 drawer + More cycles');
-      await page.getByRole('button', { name: 'Toggle sidebar' }).click();
+      await railButton.click();
       await page.getByRole('dialog', { name: 'Sidebar' }).waitFor();
       await ctx.screenshot('drawer');
       await scan('drawer');
       const d = (await page.getByRole('dialog', { name: 'Sidebar' }).boundingBox())!;
-      notes.stack.push(`drawer open: drawer centre -> ${await topAt(page, d.x + d.width / 2, d.y + 200)}; the top bar toggle (20,24) -> ${await topAt(page, 20, 24)}`);
+      const rb = (await railButton.boundingBox())!;
+      notes.stack.push(`drawer open: drawer centre -> ${await topAt(page, d.x + d.width / 2, d.y + 200)}; the rail Watchlist button -> ${await topAt(page, rb.x + rb.width / 2, rb.y + rb.height / 2)}`);
       await page.keyboard.press('Escape');
     });
     await ctx.step('dock collapse, tab and zone clock', async () => {
@@ -739,7 +736,7 @@ export const uiAudit: Scenario = {
       await dockTab('Backtest').focus();
       await page.keyboard.press('ArrowRight');
       const afterArrow = await page.evaluate(() => document.activeElement?.id ?? '');
-      notes.a11y.push(`dock tablist: ArrowRight from the Backtest tab moves focus to "${afterArrow || '(nothing)'}" (a tablist should move to dock-tab-pine)`);
+      notes.a11y.push(`dock tablist: ArrowRight from the Backtest tab moves focus to "${afterArrow || '(nothing)'}" (a tablist should move to dock-tab-optimizer)`);
       const live = await page.locator('[aria-live], [role=status], [role=alert]').count();
       notes.a11y.push(`aria-live / role=status / role=alert regions on the page: ${live} (toasts and loading states are announced only if > 0)`);
       const splitter = await page.locator('[role=separator]').count();
@@ -760,7 +757,15 @@ export const uiAudit: Scenario = {
         await page.getByTitle('Reload data').click();
         await settle(1500);
       });
-      notes.states.push(`Load with the market-data service down: toasts=${JSON.stringify(await page.locator('.toast').allInnerTexts())}, load button="${(await text(page.getByTitle('Reload data'))).trim()}", chart legend="${(await text(page.locator('.chart-legend .legend-title'))).trim()}", sidebar says: ${((await text(page.locator('.sidebar-section').first())) || '').replace(/\s+/g, ' ').slice(0, 100)}`);
+      await showSideSection(page, 'Data and library', narrow);
+      const dataSection = ((await text(page.locator('.sidebar-section').first())) || '').replace(/\s+/g, ' ').slice(0, 100);
+      if (narrow) {
+        await page.keyboard.press('Escape');
+        await page.getByRole('dialog', { name: 'Sidebar' }).waitFor({ state: 'detached' });
+      } else {
+        await showSideSection(page, 'Watchlist', false);
+      }
+      notes.states.push(`Load with the market-data service down: toasts=${JSON.stringify(await page.locator('.toast').allInnerTexts())}, load button="${(await text(page.getByTitle('Reload data'))).trim()}", chart legend="${(await text(page.locator('.chart-legend .legend-title'))).trim()}", sidebar says: ${dataSection}`);
       await ctx.screenshot('upstream-down');
       await act('switch provider with the upstream down', async () => {
         await selectProvider('kraken');
@@ -797,7 +802,7 @@ export const uiAudit: Scenario = {
       await ctx.waitForChart();
       await settle(400);
       await scan('settled app');
-      for (const t of ['Backtest', 'Pine', 'Optimizer', 'Results']) {
+      for (const t of ['Backtest', 'Optimizer', 'Results']) {
         await dockTab(t).click();
         await settle(250);
         await scan(`dock tab ${t}`);

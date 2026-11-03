@@ -1,0 +1,28 @@
+# Vost user guide
+
+How to use Vost, one page per area. Each page says what you see and what you do (buttons, menus, shortcuts) and where things are saved. Deeper reference docs are linked from the pages instead of repeated.
+
+New here? Start with [Getting started](getting-started.md).
+
+| Page | What it covers |
+|---|---|
+| [Getting started](getting-started.md) | Running Vost, your first chart, the top bar, the side panel and where your settings live |
+| [Charts](charts.md) | The chart, indicators, legend, quick ranges and the Range picker, the zone clock, reset view, screenshot, CSV export, live candles and the connection light |
+| [Timeframes](timeframes.md) | The timeframe picker, built timeframes marked `*`, the Build setting and custom intervals |
+| [Layouts](layouts.md) | 1 to 16 charts, the active chart, dividers, the narrow-screen switcher, Sync in layout and named layouts |
+| [Drawings](drawings.md) | Tool families with pop-out lists, favourites, trend lines, rays, rectangles, Fibonacci, text notes, measure, cursor kinds, the eraser, magnet and the touch tools |
+| [Fibonacci and Gann tools](drawing-fib-gann.md) | The time zone, speed resistance fan, circles, spiral, speed resistance arcs, trend-based extension, channel, trend-based time, wedge and pitchfan: placing them, and the Gann box, squares and fan: their levels and their settings |
+| [Chart patterns](drawing-patterns.md) | The XABCD, Cypher, ABCD, Head and shoulders, Triangle pattern and Three drives pattern tools, the five Elliott wave tools and the cycle tools (Cyclic lines, Time cycles, Sine line): placing the points, the labels and ratios, and the settings |
+| [Volume-based tools](drawing-volume.md) | Anchored VWAP with standard deviation bands, the Fixed range volume profile and the Anchored volume profile: placing them, the point of control, the value area and their settings |
+| [Text and notes](drawing-annotations.md) | Typing a multi-line note, the Text tab, wrapping and alignment, Anchored text that stays on the pane, and the Note, Anchored note, Price note, Callout, Comment, Price label, Signpost and Flag mark tools, the Image tool for pictures, and the Icons, Emojis and Stickers tools: the picker, placing, resizing, rotating and restyling |
+| [Forecasting and measuring tools](drawing-forecast.md) | The Long position, Short position, Forecast, Projection, Bars pattern, Ghost feed, Price range, Date range and Date and price range tools: placing them, the handles, risk, quantity and profit or loss, what the bars after the entry did, the Inputs tab, the forecast's Success or Failure the projection's arc and percent, the bars pattern's copy, mirror and flip, the ghost feed's hand-drawn bars, and the range tools' boxes, arrows and labels |
+| [Alerts](alerts.md) | Price alerts that fire around the clock, the popup, the inbox and Telegram messages |
+| [Watchlist](watchlist.md) | Lists, sections, tags, quotes, the symbol card, symbol search and import and export |
+| [Data](data.md) | Data providers, CSV import, the local library and recorded markets |
+| [Backtesting](backtesting.md) | Strategies, the Backtest pane and its range, results and the optimizer |
+| [Pine Script](pine.md) | The Pine pane, converting old scripts, libraries and the `/compare` page |
+| [Bar replay](replay.md) | Replaying the chart bar by bar from a bar you pick |
+
+Deeper docs: [custom strategies](../STRATEGIES.md), [Pine support](../PINE.md), [data sources](../DATA-SOURCES.md) and [deployment](../DEPLOYMENT.md).
+
+Contributors: a change to something a user sees or does updates the matching page in the same PR (see [CONTRIBUTING.md](../../CONTRIBUTING.md)).

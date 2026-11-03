@@ -2,10 +2,15 @@ import { useEffect, useRef } from 'react';
 import { INDICATOR_META, type IndicatorKind } from '../lib/indicatorCompute';
 import { downloadFile, candlesToCsv, sanitizeFileName } from '../lib/export';
 import { fmtNum, fmtTime } from '../lib/format';
+import { ObjectTree } from './ObjectTree';
+import { SymbolCard } from './SymbolCard';
 import { Watchlist } from './Watchlist';
 import { useStore } from '../state/store';
-
-const FOCUSABLE = 'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';
+import { selectBars } from '../state/chart';
+import { SIDE_SECTIONS } from './SideRail';
+import { useDialogKeys } from '../lib/useDialogKeys';
+import { useChart } from '../state/chartContext';
+import { pineIndicatorName } from '../lib/pine/title';
 
 export function Sidebar({ onImportCsv, drawer }: { onImportCsv: () => void; drawer?: { onClose: () => void } }) {
   const asideRef = useRef<HTMLElement>(null);
@@ -15,51 +20,27 @@ export function Sidebar({ onImportCsv, drawer }: { onImportCsv: () => void; draw
 
   // Drawer: focus the close button on open, keep Tab inside, close on Escape.
   useEffect(() => {
-    if (!isDrawer) return;
-    closeRef.current?.focus();
-    const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
-        ev.preventDefault();
-        onClose?.();
-        return;
-      }
-      if (ev.key !== 'Tab') return;
-      const root = asideRef.current;
-      if (!root) return;
-      const items = [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((e) => e.getClientRects().length > 0);
-      if (items.length === 0) return;
-      const first = items[0];
-      const last = items[items.length - 1];
-      const active = document.activeElement;
-      if (!active || !root.contains(active)) {
-        ev.preventDefault();
-        (ev.shiftKey ? last : first).focus();
-      } else if (ev.shiftKey && active === first) {
-        ev.preventDefault();
-        last.focus();
-      } else if (!ev.shiftKey && active === last) {
-        ev.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [isDrawer, onClose]);
+    if (isDrawer) closeRef.current?.focus();
+  }, [isDrawer]);
+  useDialogKeys(asideRef, isDrawer, onClose);
 
-  const symbol = useStore((s) => s.symbol);
-  const candles = useStore((s) => s.candles);
+  const symbol = useChart((s) => s.symbol);
+  const candles = useChart(selectBars);
   const timeZone = useStore((s) => s.timeZone);
-  const dataLabel = useStore((s) => s.dataLabel);
+  const dataLabel = useChart((s) => s.dataLabel);
+  const pineRuns = useChart((s) => s.pineRuns);
   const datasets = useStore((s) => s.datasets);
-  const activeDatasetId = useStore((s) => s.activeDatasetId);
-  const indicators = useStore((s) => s.indicators);
-  const saveCurrentDataset = useStore((s) => s.saveCurrentDataset);
-  const activateDataset = useStore((s) => s.activateDataset);
-  const removeDataset = useStore((s) => s.removeDataset);
-  const addIndicator = useStore((s) => s.addIndicator);
+  const activeDatasetId = useChart((s) => s.activeDatasetId);
+  const indicators = useChart((s) => s.indicators);
+  const saveCurrentDataset = useChart((s) => s.saveCurrentDataset);
+  const activateDataset = useChart((s) => s.activateDataset);
+  const removeDataset = useChart((s) => s.removeDataset);
+  const addIndicator = useChart((s) => s.addIndicator);
   const openPineEditor = useStore((s) => s.openPineEditor);
-  const removeIndicator = useStore((s) => s.removeIndicator);
-  const updateIndicator = useStore((s) => s.updateIndicator);
+  const removeIndicator = useChart((s) => s.removeIndicator);
+  const updateIndicator = useChart((s) => s.updateIndicator);
+  const section = useStore((s) => s.sidePanel);
+  const setSidePanel = useStore((s) => s.setSidePanel);
 
   const first = candles[0];
   const last = candles[candles.length - 1];
@@ -73,12 +54,27 @@ export function Sidebar({ onImportCsv, drawer }: { onImportCsv: () => void; draw
     >
       {drawer && (
         <div className="drawer-head">
-          <span>Sidebar</span>
+          <span className="drawer-sections" role="group" aria-label="Section">
+            {SIDE_SECTIONS.map((sec) => (
+              <button
+                key={sec.id}
+                type="button"
+                className={`ghost icon rail-btn${section === sec.id ? ' active' : ''}`}
+                title={sec.name}
+                aria-label={sec.name}
+                aria-pressed={section === sec.id}
+                onClick={() => setSidePanel(sec.id)}
+              >
+                {sec.icon}
+              </button>
+            ))}
+          </span>
           <button ref={closeRef} className="ghost icon" onClick={drawer.onClose} aria-label="Close sidebar" title="Close (Esc)">
             ✕
           </button>
         </div>
       )}
+      {section === 'data' && (<>
       <section className="sidebar-section">
         <div className="sidebar-title">
           <span>Data</span>
@@ -175,11 +171,18 @@ export function Sidebar({ onImportCsv, drawer }: { onImportCsv: () => void; draw
           </button>
         </div>
       </section>
+      </>)}
 
-      <section className="sidebar-section">
-        <Watchlist />
-      </section>
+      {section === 'watchlist' && (
+        <section className="sidebar-section sidebar-watchlist">
+          <Watchlist />
+          <SymbolCard />
+        </section>
+      )}
 
+      {section === 'objects' && <ObjectTree />}
+
+      {section === 'indicators' && (
       <section className="sidebar-section" style={{ borderBottom: 'none' }}>
         <div className="sidebar-title">
           <span>Indicators</span>
@@ -187,6 +190,10 @@ export function Sidebar({ onImportCsv, drawer }: { onImportCsv: () => void; draw
         </div>
         {indicators.map((spec) => {
           const meta = INDICATOR_META[spec.kind];
+          const name =
+            spec.kind === 'pine'
+              ? pineIndicatorName(spec.source ?? '', pineRuns[spec.id]?.result?.declaration.title)
+              : meta.name;
           return (
             <div className="indicator-item" key={spec.id}>
               <div className="indicator-head">
@@ -200,15 +207,18 @@ export function Sidebar({ onImportCsv, drawer }: { onImportCsv: () => void; draw
                     updateIndicator(spec.id, { color: palette[(idx + 1) % palette.length] });
                   }}
                 />
-                <span className="indicator-name" title={meta.description}>
-                  {meta.name}
+                <span className="indicator-name" title={`${name} - ${meta.description}`}>
+                  {name}
                 </span>
                 {spec.kind === 'pine' && (
                   <button
                     className="ghost"
-                    title="Edit in the Pine tab"
-                    aria-label={`Edit ${meta.name} source`}
-                    onClick={() => openPineEditor(spec.id)}
+                    title="Open in the Pine editor"
+                    aria-label={`Edit ${name} source`}
+                    onClick={() => {
+                      drawer?.onClose();
+                      openPineEditor(spec.id);
+                    }}
                   >
                     Edit
                   </button>
@@ -251,10 +261,14 @@ export function Sidebar({ onImportCsv, drawer }: { onImportCsv: () => void; draw
         <AddIndicator
           onAdd={(kind) => {
             const id = addIndicator(kind);
-            if (kind === 'pine') openPineEditor(id);
+            if (kind === 'pine') {
+              drawer?.onClose();
+              openPineEditor(id);
+            }
           }}
         />
       </section>
+      )}
     </aside>
   );
 }

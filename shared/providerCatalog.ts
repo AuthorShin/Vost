@@ -5,13 +5,14 @@
  * host name: the REST adapters in `server/providers/` own those.
  */
 import type { ProviderInfo, SymbolSuggestion } from './market.ts';
+import { builtTimeframes } from './timeframes.ts';
 
 const crypto = (exchange: string, symbolOf: (base: string) => string, quote: string, bases: string[]): SymbolSuggestion[] =>
   bases.map((b) => ({ symbol: symbolOf(b), label: `${b} / ${quote}`, exchange, type: 'crypto' }));
 
 const FIVE = ['BTC', 'ETH', 'SOL', 'XRP', 'DOGE'];
 
-export const PROVIDER_CATALOG: ProviderInfo[] = [
+const NATIVE_CATALOG: Array<Omit<ProviderInfo, 'builtTimeframes'>> = [
   {
     id: 'binance',
     name: 'Binance',
@@ -27,12 +28,12 @@ export const PROVIDER_CATALOG: ProviderInfo[] = [
   {
     id: 'coinbase',
     name: 'Coinbase',
-    description: 'Free public crypto spot data from Coinbase Exchange (REST candles, 300 per request). No key needed. No live streaming.',
+    description: 'Free public crypto spot data from Coinbase Exchange (REST candles, 300 per request). Live candles are built from its public trade feed. No key needed.',
     timeframes: ['1m', '5m', '15m', '1h', '1d'],
     defaultTimeframe: '1h',
     defaultSymbol: 'BTC-USD',
     popularSymbols: crypto('Coinbase', (b) => `${b}-USD`, 'USD', FIVE),
-    supportsLive: false,
+    supportsLive: true,
     hasSymbolList: false,
     hasSearch: true,
   },
@@ -79,6 +80,37 @@ export const PROVIDER_CATALOG: ProviderInfo[] = [
     hasSearch: true,
   },
   {
+    id: 'hyperliquid-perps',
+    name: 'Hyperliquid Perps',
+    description:
+      'Free public perpetual futures data from Hyperliquid - REST candles + live websocket. Only the latest 5000 candles per timeframe are kept. No key needed.',
+    timeframes: ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M'],
+    defaultTimeframe: '1h',
+    defaultSymbol: 'BTC',
+    popularSymbols: crypto('Hyperliquid', (b) => b, 'USDC perp', ['BTC', 'ETH', 'SOL', 'HYPE', 'XRP']),
+    supportsLive: true,
+    hasSymbolList: false,
+    hasSearch: true,
+  },
+  {
+    id: 'hyperliquid-spot',
+    name: 'Hyperliquid Spot',
+    description:
+      'Free public spot data from Hyperliquid - REST candles + live websocket. Only the latest 5000 candles per timeframe are kept. No key needed.',
+    timeframes: ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1M'],
+    defaultTimeframe: '1h',
+    defaultSymbol: 'HYPE/USDC',
+    popularSymbols: ['HYPE', 'UBTC', 'UETH', 'USOL', 'PURR'].map((b) => ({
+      symbol: `${b}/USDC`,
+      label: `${b} / USDC`,
+      exchange: 'Hyperliquid',
+      type: 'crypto',
+    })),
+    supportsLive: true,
+    hasSymbolList: false,
+    hasSearch: true,
+  },
+  {
     id: 'yahoo',
     name: 'Yahoo Finance',
     description: 'Free delayed data for stocks, ETFs, indices, forex and crypto. No key needed.',
@@ -103,31 +135,10 @@ export const PROVIDER_CATALOG: ProviderInfo[] = [
     hasSymbolList: false,
     hasSearch: true,
   },
-  {
-    id: 'stooq',
-    name: 'Stooq',
-    description: 'Free historical data (stocks / indices / FX / crypto) downloadable as CSV. No key needed.',
-    timeframes: ['1d', '1w', '1M'],
-    defaultTimeframe: '1d',
-    defaultSymbol: 'aapl.us',
-    popularSymbols: [
-      { symbol: 'aapl.us', label: 'Apple (US)', exchange: 'US', type: 'stock' },
-      { symbol: 'msft.us', label: 'Microsoft (US)', exchange: 'US', type: 'stock' },
-      { symbol: 'tsla.us', label: 'Tesla (US)', exchange: 'US', type: 'stock' },
-      { symbol: 'spy.us', label: 'SPDR S&P 500 ETF', exchange: 'US', type: 'etf' },
-      { symbol: '^spx', label: 'S&P 500 Index', exchange: 'US', type: 'index' },
-      { symbol: '^ndq', label: 'Nasdaq 100 Index', exchange: 'US', type: 'index' },
-      { symbol: 'btcusd', label: 'Bitcoin / USD', exchange: 'CRYPT', type: 'crypto' },
-      { symbol: 'ethusd', label: 'Ethereum / USD', exchange: 'CRYPT', type: 'crypto' },
-      { symbol: 'eurusd', label: 'EUR / USD', exchange: 'FX', type: 'forex' },
-      { symbol: 'usdjpy', label: 'USD / JPY', exchange: 'FX', type: 'forex' },
-      { symbol: 'xauusd', label: 'Gold / USD', exchange: 'XAU', type: 'commodity' },
-    ],
-    supportsLive: false,
-    hasSymbolList: true,
-    hasSearch: true,
-  },
 ];
+
+/** The catalog with `builtTimeframes` derived from each entry's native `timeframes`. */
+export const PROVIDER_CATALOG: ProviderInfo[] = NATIVE_CATALOG.map((p) => ({ ...p, builtTimeframes: builtTimeframes(p.timeframes) }));
 
 export function catalogEntry(id: string): ProviderInfo | undefined {
   return PROVIDER_CATALOG.find((p) => p.id === id);

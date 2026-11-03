@@ -1,21 +1,22 @@
+import { RangeIcon } from './Icons';
 import { useState } from 'react';
 import { useStore } from '../state/store';
+import { selectDataCandles } from '../state/chart';
 import { FULL_RANGE, type TimeRange } from '../lib/timeRange';
 import { TimeRangePicker } from './TimeRangePicker';
+import { useChart } from '../state/chartContext';
 
-/** Top bar Range button and its draft panel; the store changes only on Apply. */
+/** Range button and its draft panel, in the chart bar (and the More menu on narrow top bars); the store changes only on Apply. */
 export function ChartRangeControl() {
-  const chartRange = useStore((s) => s.chartRange);
-  const fullCandles = useStore((s) => s.fullCandles);
-  const candles = useStore((s) => s.candles);
+  const chartRange = useChart((s) => s.chartRange);
+  const full = useChart(selectDataCandles);
   const timeZone = useStore((s) => s.timeZone);
-  const loading = useStore((s) => s.loadState === 'loading');
-  const setChartRange = useStore((s) => s.setChartRange);
-  const clearChartRange = useStore((s) => s.clearChartRange);
+  const loading = useChart((s) => s.loadState === 'loading');
+  const setChartRange = useChart((s) => s.setChartRange);
+  const clearChartRange = useChart((s) => s.clearChartRange);
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<TimeRange>(FULL_RANGE);
 
-  const full = fullCandles ?? candles;
   const bounds = full.length > 0 ? { first: full[0].time, last: full[full.length - 1].time } : undefined;
   const active = chartRange != null;
 
@@ -33,10 +34,11 @@ export function ChartRangeControl() {
         aria-expanded={open}
         title="Show a time window of the chart"
       >
+        <RangeIcon />
         {active ? 'Range on' : 'Range'}
       </button>
       {active && (
-        <button className="ghost" onClick={clearChartRange} title="Show all loaded bars again">
+        <button className="ghost" onClick={() => void clearChartRange()} title="Show all loaded bars again">
           Clear range
         </button>
       )}

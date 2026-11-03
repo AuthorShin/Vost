@@ -111,7 +111,7 @@ Install first with `npm ci` (the gate commands in `.claude/factory-loop.json` in
 | Build | `npm run build` | step "Build client" |
 
 Non-gate command (UI evidence; never in a gate or CI; see `docs/e2e-visual-verification.md`):
-`npm run -s e2e:capture -- <scenario>` (scenarios: `chart`, `chart-pan`, `chart-reset`, `chart-range`, `conn-status`, `zone-clock`, `bt-range`, `pine-tab`, `pine-convert`, `pane-resize`, `responsive`, `network-audit`, `outage`, `watchlist`, `ui-audit`).
+`npm run -s e2e:capture -- <scenario>` (scenarios: `alerts`, `chart`, `chart-history`, `chart-pan`, `chart-panes`, `chart-reset`, `chart-range`, `drawing-rail`, `drawing-lines`, `drawing-shapes`, `drawing-channels`, `drawing-fib`, `drawing-fib-trend`, `drawing-gann`, `drawing-pitchforks`, `drawing-patterns`, `drawing-elliott`, `drawing-cycles`, `drawing-volume`, `drawing-manage`, `drawing-text`, `drawing-toolbar`, `drawing-table`, `drawing-notes`, `drawing-positions`, `drawing-forecast`, `drawing-bars`, `drawing-ranges`, `drawing-price-markers`, `drawing-image`, `drawing-icons`, `drawings`, `drawing-settings`, `layouts`, `conn-status`, `zone-clock`, `bt-range`, `bt-progress`, `bt-results`, `monte-carlo`, `optimizer`, `built-timeframe`, `custom-timeframe`, `pine-pane`, `pine-drawings`, `pine-render`, `pine-convert`, `pine-security`, `pine-libraries`, `compare`, `replay`, `pane-resize`, `responsive`, `settings`, `network-audit`, `outage`, `watchlist`, `ui-audit`).
 
 One suite while debugging: `npm test -- client/src/lib/csv.test.ts`. Test output settings
 (dot reporter, silent) live in `vitest.config.ts`.
@@ -128,4 +128,12 @@ Any agent making code changes - solo or delegated - works inside a a treehouse w
 To run the app: `npm run dev` starts the API server (`server/index.mjs`, port 8787) and the
 Vite client (port 5173) together. No keys are needed: the defaults in `.env.example` work
 as they are.
+
+## User guide
+
+`docs/guide/` is the user guide (one page per feature area, indexed in `docs/guide/README.md`). A PR that adds or
+changes something a user sees or does updates the matching guide page in the same PR, reusing that PR's captures
+from `docs/evidence/` (add a page and list it in the index for a new area). `scripts/guide.test.ts` (part of `npm test`)
+fails on an unindexed or missing page, a broken relative link or image, or a bad `#anchor`. Release notes from v0.11.0
+must link every highlight to the guide (see `RELEASING.md`).
 <!-- end repo-owned -->

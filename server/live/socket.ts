@@ -12,6 +12,8 @@ import type { LiveFeed } from './feeds.ts';
 export const MAX_ATTEMPTS = 8;
 /** Pause between attempts once the feed gave up. */
 export const SLOW_RETRY_MS = 60_000;
+/** Pause before an async subscribe that failed to resolve is tried again (the socket stays open). */
+export const SUBSCRIBE_RETRY_MS = 15_000;
 
 export function backoffMs(attempts: number): number {
   return Math.min(15000, 700 * 2 ** (attempts - 1));
@@ -72,6 +74,20 @@ export function openUpstream(opts: SocketOptions): UpstreamSocket {
   let retryTimer: unknown;
   let pingTimer: unknown;
   let lastStatus = '';
+  let connClosers: Array<() => void> = [];
+
+  /** Ends the current connection's feed state (its seed retry, its emit). */
+  const endConn = (): void => {
+    const fns = connClosers;
+    connClosers = [];
+    for (const fn of fns) {
+      try {
+        fn();
+      } catch {
+        /* ignore */
+      }
+    }
+  };
 
   const log = (severity: LiveLogEvent['severity'], text: string): void => opts.onLog({ severity, text });
 
@@ -110,6 +126,31 @@ export function openUpstream(opts: SocketOptions): UpstreamSocket {
     retryTimer = timers.setTimeout(connect, backoffMs(attempts));
   };
 
+  /** Awaits the feed's subscribe message and sends it if `sock` is still the current socket; retries a failed lookup. */
+  const sendResolved = (sock: WsLike, resolve: () => Promise<string>): void => {
+    resolve().then(
+      (message) => {
+        if (ws !== sock || stopped) return;
+        try {
+          sock.send(message);
+        } catch {
+          /* onclose handles it */
+        }
+      },
+      (err: unknown) => {
+        if (ws !== sock || stopped) return;
+        log(
+          'error',
+          `Could not look up the subscription for ${label}: ${err instanceof Error ? err.message : String(err)}. Retrying in ${SUBSCRIBE_RETRY_MS / 1000} s.`,
+        );
+        const timer = timers.setTimeout(() => {
+          if (ws === sock && !stopped) sendResolved(sock, resolve);
+        }, SUBSCRIBE_RETRY_MS);
+        connClosers.push(() => timers.clearTimeout(timer));
+      },
+    );
+  };
+
   const connect = (): void => {
     if (stopped) return;
     retryTimer = undefined;
@@ -123,14 +164,19 @@ export function openUpstream(opts: SocketOptions): UpstreamSocket {
       return;
     }
     ws = sock;
+    endConn();
     sock.onopen = () => {
       if (ws !== sock) return;
       attempts = 0;
       status({ status: 'live' });
-      try {
-        if (feed.subscribe) sock.send(feed.subscribe);
-      } catch {
-        /* onclose handles it */
+      if (typeof feed.subscribe === 'function') {
+        sendResolved(sock, feed.subscribe);
+      } else {
+        try {
+          if (feed.subscribe) sock.send(feed.subscribe);
+        } catch {
+          /* onclose handles it */
+        }
       }
       if (feed.pingMs && feed.ping !== undefined) {
         const ping = feed.ping;
@@ -141,6 +187,21 @@ export function openUpstream(opts: SocketOptions): UpstreamSocket {
             /* onclose handles it */
           }
         }, feed.pingMs);
+      }
+      if (feed.onOpen) {
+        try {
+          feed.onOpen({
+            emit: (items) => {
+              if (ws !== sock || stopped) return;
+              for (const k of items) opts.onKline(k.candle, k.closed);
+            },
+            log,
+            timers,
+            onClose: (fn) => connClosers.push(fn),
+          });
+        } catch {
+          /* a broken hook must not drop the connection */
+        }
       }
     };
     sock.onmessage = (ev) => {
@@ -160,6 +221,7 @@ export function openUpstream(opts: SocketOptions): UpstreamSocket {
       if (ws !== sock) return;
       ws = null;
       clearPing();
+      endConn();
       if (stopped) return;
       fail(formatClose(ev));
     };
@@ -173,6 +235,7 @@ export function openUpstream(opts: SocketOptions): UpstreamSocket {
       if (retryTimer !== undefined) timers.clearTimeout(retryTimer);
       retryTimer = undefined;
       clearPing();
+      endConn();
       const sock = ws;
       ws = null;
       if (sock) {

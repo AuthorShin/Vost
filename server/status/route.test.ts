@@ -29,6 +29,28 @@ beforeAll(async () => {
 });
 afterAll(() => new Promise<void>((r) => server.close(() => r())));
 
+describe('GET /api/status candles', () => {
+  it('is absent without stats and present with them', async () => {
+    const base = { version: '1', intervalSeconds: 0, log: () => undefined };
+    expect(createStatusService(base).response()).not.toHaveProperty('candles');
+    const stats = { on: true, series: 2, rows: 30, bytes: 4096 };
+    expect(createStatusService({ ...base, candleStats: () => stats }).response().candles).toEqual(stats);
+  });
+});
+
+describe('GET /api/status recorder', () => {
+  it('is absent without stats and present with them', async () => {
+    const base = { version: '1', intervalSeconds: 0, log: () => undefined };
+    expect(createStatusService(base).response()).not.toHaveProperty('recorder');
+    const stats = {
+      on: true,
+      depthBars: 20000,
+      series: [{ provider: 'binance', symbol: 'BTCUSDT', timeframe: '1h', live: 'live', lastCandleTime: 1700000000, missingBars: 0, refills: 3, lastRefillAt: 1700000100000, lastError: null }],
+    };
+    expect(createStatusService({ ...base, recorderStats: () => stats }).response().recorder).toEqual(stats);
+  });
+});
+
 describe('GET /api/status', () => {
   it('answers the server block and one check per provider and feed, without refreshed', async () => {
     const res = await fetch(`${base}/api/status`);
@@ -38,7 +60,7 @@ describe('GET /api/status', () => {
     expect(body.server).toMatchObject({ state: 'ok', version: '9.9.9' });
     expect(typeof body.server.uptimeSeconds).toBe('number');
     expect(body.intervalSeconds).toBe(0);
-    expect(body.checks).toHaveLength(17);
+    expect(body.checks).toHaveLength(23);
     expect(body.checks[0]).toEqual({
       provider: 'binance',
       providerName: 'Binance',
@@ -58,10 +80,10 @@ describe('GET /api/status', () => {
     const first = (await (await fetch(`${base}/api/status?refresh=1`)).json()) as StatusResponse;
     expect(first.refreshed).toBe(true);
     expect(first.checks.every((c: { state: string }) => c.state === 'ok')).toBe(true);
-    expect(probes).toBe(17);
+    expect(probes).toBe(23);
     const second = (await (await fetch(`${base}/api/status?refresh=1`)).json()) as StatusResponse;
     expect(second.refreshed).toBe(false);
-    expect(probes).toBe(17);
+    expect(probes).toBe(23);
   });
 
   it('refuses other methods', async () => {

@@ -4,21 +4,18 @@ import { useViewportSize } from '../lib/useViewportSize';
 import { useStore, type DockTab } from '../state/store';
 import { Splitter } from './Splitter';
 import { BacktestTab } from './BacktestTab';
-import { PineTab } from './PineTab';
 import { OptimizerTab } from './OptimizerTab';
 import { ResultsTab } from './ResultsTab';
-import { ZoneClock } from './ZoneClock';
+import { useChart } from '../state/chartContext';
 
 export function BottomDock() {
   const tab = useStore((s) => s.dockTab);
   const collapsed = useStore((s) => s.dockCollapsed);
   const setDockTab = useStore((s) => s.setDockTab);
   const setDockCollapsed = useStore((s) => s.setDockCollapsed);
-  const pineCount = useStore((s) => s.indicators.filter((i) => i.kind === 'pine').length);
-  const pineRunning = useStore((s) => Object.values(s.pineRuns).some((r) => r.running));
-  const btResult = useStore((s) => s.btResult);
-  const btRunning = useStore((s) => s.btRunning);
-  const optResult = useStore((s) => s.optResult);
+  const btResult = useChart((s) => s.btResult);
+  const btRunning = useChart((s) => s.btRunning);
+  const optResult = useChart((s) => s.optResult);
 
   const dockHeight = useStore((s) => s.dockHeight);
   const setDockHeight = useStore((s) => s.setDockHeight);
@@ -79,11 +76,6 @@ export function BottomDock() {
             <span>⚙</span> <span className="dock-tab-label">Backtest</span>
             {btRunning && <span className="spinner" />}
           </button>
-          <button {...tabProps('pine')}>
-            <span>{'{ }'}</span> <span className="dock-tab-label">Pine</span>
-            {pineRunning && <span className="spinner" />}
-            {pineCount > 0 && <span className="badge">{pineCount}</span>}
-          </button>
           <button {...tabProps('optimizer')}>
             <span>⛭</span> <span className="dock-tab-label">Optimizer</span>
             {optResult && <span className="badge">{optResult.combos}</span>}
@@ -94,15 +86,13 @@ export function BottomDock() {
           </button>
         </div>
         <div className="dock-spacer" />
-        <ZoneClock />
         <button className="ghost icon" title={collapsed ? 'Expand' : 'Collapse'} onClick={() => setDockCollapsed(!collapsed)}>
           {collapsed ? '▲' : '▼'}
         </button>
       </div>
       {!collapsed && (
-        <div className={`dock-body${tab === 'pine' ? ' pine' : ''}`} role="tabpanel" id="dock-panel" aria-labelledby={`dock-tab-${tab}`}>
+        <div className="dock-body" role="tabpanel" id="dock-panel" aria-labelledby={`dock-tab-${tab}`}>
           {tab === 'backtest' && <BacktestTab />}
-          {tab === 'pine' && <PineTab />}
           {tab === 'optimizer' && <OptimizerTab />}
           {tab === 'results' && <ResultsTab />}
         </div>

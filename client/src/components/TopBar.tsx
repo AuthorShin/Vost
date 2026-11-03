@@ -4,50 +4,74 @@ import { fmtDataRange } from '../lib/format';
 import { topbarTier } from '../lib/paneSizes';
 import { useViewportSize } from '../lib/useViewportSize';
 import { getProvider, providers } from '../lib/providers';
-import { TIMEFRAMES } from '../types';
+import { pickerTimeframes } from '../lib/customTimeframes';
+import { IntervalDialog } from './IntervalDialog';
 import { unreadCount } from '../lib/messages';
+import { useAlerts } from '../state/alerts';
 import { useStore } from '../state/store';
+import { selectDataCandles } from '../state/chart';
 import { ChartRangeControl } from './ChartRangeControl';
+import { BellIcon, GearIcon, InboxIcon, RefreshIcon, ReplayIcon, StarIcon, UploadIcon } from './Icons';
 import { ConnectionStatus } from './ConnectionStatus';
+import { LayoutDialogs } from './LayoutDialogs';
+import { LayoutMenu } from './LayoutMenu';
+import { LayoutPicker } from './LayoutPicker';
+import { SettingsDialog } from './SettingsDialog';
 import { SymbolSearch } from './SymbolSearch';
 import { TopBarMore } from './TopBarMore';
+import type { Interval } from '../types';
+import { useChart, useChartStore } from '../state/chartContext';
 
+const ADD_INTERVAL = '__add-interval';
 const BAR_OPTIONS = [500, 1000, 2000, 5000, 10000, 20000];
 
 export function TopBar({
   onImportCsv,
-  onToggleSidebar,
   onOpenInbox,
-  sidebarExpanded,
-  toggleRef,
+  onOpenAlerts,
+  pineToggleRef,
 }: {
   onImportCsv: () => void;
-  onToggleSidebar: () => void;
   onOpenInbox: () => void;
-  sidebarExpanded: boolean;
-  toggleRef?: Ref<HTMLButtonElement>;
+  onOpenAlerts: () => void;
+  pineToggleRef?: Ref<HTMLButtonElement>;
 }) {
   const tier = topbarTier(useViewportSize().width);
+  const chartStore = useChartStore();
   const providerInMore = tier === 'narrow' || tier === 'tiny';
   const importInMore = tier !== 'full';
 
-  const providerId = useStore((s) => s.providerId);
-  const timeframe = useStore((s) => s.timeframe);
-  const bars = useStore((s) => s.bars);
-  const loadState = useStore((s) => s.loadState);
+  const providerId = useChart((s) => s.providerId);
+  const timeframe = useChart((s) => s.timeframe);
+  const bars = useChart((s) => s.bars);
+  const loadState = useChart((s) => s.loadState);
+  const activeAlerts = useAlerts((s) => s.alerts.filter((a) => a.status === 'active').length);
   const unread = useStore((s) => unreadCount(s.messages));
-  const live = useStore((s) => s.live);
-  const candles = useStore((s) => s.candles);
-  const chartRange = useStore((s) => s.chartRange);
+  const pineOpen = useStore((s) => s.pineOpen);
+  const pineCount = useChart((s) => s.indicators.filter((i) => i.kind === 'pine').length);
+  const pineRunning = useChart((s) => Object.values(s.pineRuns).some((r) => r.running));
+  const togglePineEditor = useStore((s) => s.togglePineEditor);
+  const live = useChart((s) => s.live);
+  const candles = useChart(selectDataCandles);
+  const replayOn = useChart((s) => s.replay != null);
+  const hasBars = useChart((s) => s.candles.length >= 3);
+  const chartRange = useChart((s) => s.chartRange);
   const timeZone = useStore((s) => s.timeZone);
   const [now, setNow] = useState(() => Date.now() / 1000);
-  const liveStatus = useStore((s) => s.liveStatus);
-  const liveDetail = useStore((s) => s.liveDetail);
-  const setProvider = useStore((s) => s.setProvider);
-  const setTimeframe = useStore((s) => s.setTimeframe);
-  const setBars = useStore((s) => s.setBars);
-  const loadData = useStore((s) => s.loadData);
-  const setLive = useStore((s) => s.setLive);
+  const liveStatus = useChart((s) => s.liveStatus);
+  const liveDetail = useChart((s) => s.liveDetail);
+  const setProvider = useChart((s) => s.setProvider);
+  const setTimeframe = useChart((s) => s.setTimeframe);
+  const buildTimeframes = useStore((s) => s.buildTimeframes);
+  /** The Bars menu only exists when everything loads at once; in scroll mode history pages in as the chart is scrolled. */
+  const showBars = useStore((s) => s.historyLoading) === 'all';
+  const customTimeframes = useStore((s) => s.customTimeframes);
+  const [intervalOpen, setIntervalOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const setBuildTimeframes = useStore((s) => s.setBuildTimeframes);
+  const setBars = useChart((s) => s.setBars);
+  const loadData = useChart((s) => s.loadData);
+  const setLive = useChart((s) => s.setLive);
 
   useEffect(() => {
     if (!live) return;
@@ -59,7 +83,8 @@ export function TopBar({
   const rangeText = fmtDataRange(candles[0]?.time, candles[candles.length - 1]?.time, candles.length, { live: live && !chartRange, now, timeZone });
 
   const provider = getProvider(providerId);
-  const timeframes = TIMEFRAMES.filter((tf) => provider.timeframes.includes(tf));
+  const source = buildTimeframes && !provider.offline ? 'built' : 'native';
+  const pickerEntries = pickerTimeframes(provider, customTimeframes, source);
 
   const liveClass = liveStatus === 'live' ? '' : liveStatus === 'connecting' || liveStatus === 'reconnecting' ? 'connecting' : 'error';
 
@@ -92,8 +117,38 @@ export function TopBar({
       onClick={() => (liveStatus === 'error' ? onOpenInbox() : setLive(!live))}
       title={liveStatus === 'error' ? `${liveDetail} - click to open the inbox` : liveDetail || 'Stream live candles from Binance'}
     >
-      <span className={`live-dot ${liveClass}`} style={{ marginRight: 6 }} />
+      <span className={`live-dot ${liveClass}`} />
       {liveStatus === 'live' ? 'LIVE' : liveStatus === 'connecting' ? '…' : liveStatus === 'reconnecting' ? 'RETRY' : liveStatus === 'error' ? 'ERR' : 'Live'}
+    </button>
+  );
+  const buildButton = (
+    <button
+      className={buildTimeframes ? 'build-toggle blue' : 'build-toggle'}
+      style={{ cursor: 'pointer' }}
+      aria-pressed={buildTimeframes}
+      aria-label="Build higher timeframes from lower ones"
+      title="Build higher timeframes from lower ones instead of the exchange's own bars"
+      onClick={() => setBuildTimeframes(!buildTimeframes)}
+    >
+      Build
+    </button>
+  );
+  const replayButton = (after?: () => void) => (
+    <button
+      className={replayOn ? 'badge blue' : 'badge'}
+      style={{ cursor: 'pointer' }}
+      disabled={!hasBars && !replayOn}
+      aria-pressed={replayOn}
+      title={replayOn ? 'Leave bar replay' : 'Replay the chart bar by bar from a bar you pick'}
+      onClick={() => {
+        after?.();
+        const st = chartStore.getState();
+        if (st.replay) st.exitReplay();
+        else st.startReplayPick();
+      }}
+    >
+      <ReplayIcon />
+      Replay
     </button>
   );
   const importButton = (after?: () => void) => (
@@ -104,33 +159,23 @@ export function TopBar({
       }}
       title="Import OHLCV CSV — works fully offline"
     >
-      ⬆ Import CSV
+      <UploadIcon />
+      Import CSV
     </button>
   );
   const githubLink = (
-    <a className="badge" href={PROVIDER_GITHUB_URL} target="_blank" rel="noreferrer" title="Star Vost on GitHub" style={{ padding: '5px 10px' }}>
-      ★ GitHub
+    <a className="badge" href={PROVIDER_GITHUB_URL} target="_blank" rel="noreferrer" title="Star Vost on GitHub">
+      <StarIcon />
+      GitHub
     </a>
   );
 
   return (
     <header className="topbar">
-      <button
-        ref={toggleRef}
-        className="ghost icon"
-        title="Toggle sidebar"
-        aria-label="Toggle sidebar"
-        aria-expanded={sidebarExpanded}
-        aria-controls="sidebar"
-        onClick={onToggleSidebar}
-      >
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <rect x="3" y="4" width="18" height="16" rx="2" />
-          <line x1="9" y1="4" x2="9" y2="20" />
-        </svg>
-      </button>
-
-      <div className="brand" title="Vost — open-source charts & backtesting">
+      <LayoutPicker />
+      {!providerInMore && <LayoutMenu />}
+      <LayoutDialogs />
+      <div className="brand" title={`Vost v${APP_VERSION} — self-hosted charts & backtesting`}>
         <span className="brand-logo">
           <svg width="16" height="16" viewBox="0 0 32 32">
             <rect x="5" y="9" width="4" height="14" rx="1" fill="#22c55e" />
@@ -142,8 +187,6 @@ export function TopBar({
           </svg>
         </span>
         <span className="brand-name">Vost</span>
-        <span className="brand-version" title="Vost version">v{APP_VERSION}</span>
-        <span className="brand-tag">self-hosted charts &amp; backtesting</span>
       </div>
 
       <div className="topbar-sep" />
@@ -155,20 +198,22 @@ export function TopBar({
       <div className="field">
         <select
           value={timeframe}
-          onChange={(e) => setTimeframe(e.target.value as (typeof timeframes)[number])}
+          onChange={(e) => (e.target.value === ADD_INTERVAL ? setIntervalOpen(true) : setTimeframe(e.target.value as Interval))}
           title="Timeframe"
         >
-          {timeframes.map((tf) => (
-            <option key={tf} value={tf}>
-              {tf}
+          {pickerEntries.map(({ interval, base }) => (
+            <option key={interval} value={interval} title={base ? `Built from ${base}` : undefined}>
+              {base ? `${interval} *` : interval}
             </option>
           ))}
+          <option disabled>──────────</option>
+          <option value={ADD_INTERVAL}>Add interval...</option>
         </select>
       </div>
 
-      {!importInMore && barsSelect}
+      {!importInMore && !provider.offline && buildButton}
 
-      {!providerInMore && <ChartRangeControl />}
+      {!importInMore && showBars && barsSelect}
 
       {rangeText && (
         <span className="topbar-range" title={rangeText}>
@@ -176,21 +221,44 @@ export function TopBar({
         </span>
       )}
 
-      <button className="primary" onClick={() => void loadData()} disabled={loadState === 'loading'} title="Reload data">
-        {loadState === 'loading' ? <span className="spinner" /> : 'Load'}
+      <button className="primary" onClick={() => void loadData()} disabled={loadState === 'loading'} title="Reload data" aria-label="Load">
+        {loadState === 'loading' ? (
+          <span className="spinner" />
+        ) : (
+          <>
+            <RefreshIcon />
+            <span className="btn-label">Load</span>
+          </>
+        )}
       </button>
 
       {!providerInMore && liveButton}
+
+      {!providerInMore && replayButton()}
 
       <ConnectionStatus />
 
       <div className="topbar-right">
         <button className="ghost icon inbox-btn" onClick={onOpenInbox} title="Inbox (messages and errors)" aria-label="Inbox">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M22 12h-6l-2 3h-4l-2-3H2" />
-            <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
-          </svg>
+          <InboxIcon />
           {unread > 0 && <span className="inbox-badge">{unread > 99 ? '99+' : unread}</span>}
+        </button>
+        <button
+          ref={pineToggleRef}
+          className={`pine-toggle${pineOpen ? ' active' : ''}`}
+          aria-pressed={pineOpen}
+          aria-label="Pine Editor"
+          title="Pine Editor"
+          onClick={togglePineEditor}
+        >
+          <span aria-hidden="true">{'{ }'}</span>
+          {tier === 'full' && <span className="btn-label">Pine Editor</span>}
+          {pineRunning && <span className="spinner" />}
+          {pineCount > 0 && <span className="badge">{pineCount}</span>}
+        </button>
+        <button className="ghost icon inbox-btn" onClick={onOpenAlerts} title="Alerts" aria-label="Alerts">
+          <BellIcon />
+          {activeAlerts > 0 && <span className="inbox-badge alerts-badge" data-testid="alerts-badge">{activeAlerts > 99 ? '99+' : activeAlerts}</span>}
         </button>
         {!importInMore && importButton()}
         {!importInMore && githubLink}
@@ -204,15 +272,29 @@ export function TopBar({
                   </div>
                 )}
                 {providerInMore && (
+                  <div className="more-row more-layout">
+                    <span className="more-label">Layout</span>
+                    <LayoutMenu inline onDone={close} />
+                  </div>
+                )}
+                {providerInMore && (
                   <div className="more-row">
                     <span className="more-label">Provider</span>
                     {providerSelect}
                   </div>
                 )}
-                <div className="more-row">
-                  <span className="more-label">Bars</span>
-                  {barsSelect}
-                </div>
+                {!provider.offline && (
+                  <div className="more-row">
+                    <span className="more-label">Timeframes</span>
+                    {buildButton}
+                  </div>
+                )}
+                {showBars && (
+                  <div className="more-row">
+                    <span className="more-label">Bars</span>
+                    {barsSelect}
+                  </div>
+                )}
                 {providerInMore && (
                   <div className="more-row">
                     <span className="more-label">Range</span>
@@ -225,13 +307,24 @@ export function TopBar({
                     {liveButton}
                   </div>
                 )}
+                {providerInMore && (
+                  <div className="more-row">
+                    <span className="more-label">Replay</span>
+                    {replayButton(close)}
+                  </div>
+                )}
                 <div className="more-row">{importButton(close)}</div>
                 <div className="more-row">{githubLink}</div>
               </>
             )}
           </TopBarMore>
         )}
+        <button className="ghost icon inbox-btn" onClick={() => setSettingsOpen(true)} title="Vost settings" aria-label="Settings">
+          <GearIcon />
+        </button>
       </div>
+      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+      {intervalOpen && <IntervalDialog provider={provider} entries={pickerEntries} source={source} onClose={() => setIntervalOpen(false)} />}
     </header>
   );
 }

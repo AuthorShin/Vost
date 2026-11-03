@@ -1,9 +1,13 @@
+import { mkdtemp, rm } from 'node:fs/promises';
 import http from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_BARS, TIMEFRAMES } from '../shared/market.ts';
 import { PROVIDER_CATALOG } from '../shared/providerCatalog.ts';
-import { createApiDeps, handleApi } from './api.ts';
+import { createApiDeps, handleApi, providerHistory } from './api.ts';
+import { openCandleStore } from './candles/store.ts';
 import { fakeFetch, type FakeFetch } from './providers/testing.ts';
 
 let server: http.Server;
@@ -39,6 +43,9 @@ async function get(path: string): Promise<{ status: number; body: any; headers: 
   return { status: res.status, body: await res.json(), headers: res.headers };
 }
 
+const binanceInfo = {
+  symbols: ['BTC', 'ETH', 'SPDR'].map((b) => ({ symbol: `${b}USDT`, status: 'TRADING', baseAsset: b, quoteAsset: 'USDT' })),
+};
 const kline = (ms: number) => [ms, '1', '3', '0.5', '2', '9'];
 
 describe('GET /api/providers', () => {
@@ -47,7 +54,7 @@ describe('GET /api/providers', () => {
     expect(r.status).toBe(200);
     expect(r.body).toEqual(PROVIDER_CATALOG);
     expect(r.headers.get('cache-control')).toBe('no-store');
-    expect(r.body.map((p: { id: string }) => p.id)).toEqual(['binance', 'coinbase', 'kraken', 'bybit', 'okx', 'yahoo', 'stooq']);
+    expect(r.body.map((p: { id: string }) => p.id)).toEqual(['binance', 'coinbase', 'kraken', 'bybit', 'okx', 'hyperliquid-perps', 'hyperliquid-spot', 'yahoo']);
     expect(JSON.stringify(r.body)).not.toMatch(/https?:\/\//);
   });
 });
@@ -65,8 +72,10 @@ describe('GET /api/history', () => {
     ['an unknown provider', '/api/history?provider=nope&symbol=A&timeframe=1h&bars=5', /Unknown provider "nope"/],
     ['a missing provider', '/api/history?symbol=A&timeframe=1h&bars=5', /Unknown provider/],
     ['a missing symbol', '/api/history?provider=binance&timeframe=1h&bars=5', /Missing symbol/],
-    ['a timeframe the app does not know', '/api/history?provider=binance&symbol=A&timeframe=3m&bars=5', /does not support timeframe 3m/],
-    ['a timeframe the provider lacks', '/api/history?provider=coinbase&symbol=A&timeframe=4h&bars=5', /Coinbase does not support timeframe 4h/],
+    ['a timeframe the app does not know', '/api/history?provider=binance&symbol=A&timeframe=2x&bars=5', /timeframe must be a number and a unit m, h, d, w or M, such as 2h/],
+    ['a timeframe out of range', '/api/history?provider=binance&symbol=A&timeframe=13M&bars=5', /such as 2h/],
+    ['a non-canonical interval', '/api/history?provider=binance&symbol=A&timeframe=120m&bars=5', /write 120m as 2h/],
+    ['a provider that was dropped', '/api/history?provider=stooq&symbol=aapl.us&timeframe=1d&bars=5', /Unknown provider "stooq"/],
     ['bars 0', '/api/history?provider=binance&symbol=A&timeframe=1h&bars=0', /bars must be an integer/],
     [`bars ${MAX_BARS + 1}`, `/api/history?provider=binance&symbol=A&timeframe=1h&bars=${MAX_BARS + 1}`, /bars must be an integer/],
     ['bars 1.5', '/api/history?provider=binance&symbol=A&timeframe=1h&bars=1.5', /bars must be an integer/],
@@ -99,9 +108,9 @@ describe('GET /api/history', () => {
     expect(r.body.error).toBe('Kraken: HTTP 400 - bad gateway');
   });
 
-  it('every provider refuses exactly the timeframes its catalog entry lacks (400), before any upstream call', async () => {
+  it('every provider refuses exactly the timeframes it neither has nor can build (400), before any upstream call', async () => {
     for (const info of PROVIDER_CATALOG) {
-      for (const tf of TIMEFRAMES.filter((t) => !info.timeframes.includes(t))) {
+      for (const tf of TIMEFRAMES.filter((t) => !info.timeframes.includes(t) && !info.builtTimeframes.includes(t))) {
         const r = await get(`/api/history?provider=${info.id}&symbol=A&timeframe=${tf}&bars=5`);
         expect(r.status, `${info.id} ${tf}`).toBe(400);
       }
@@ -109,14 +118,43 @@ describe('GET /api/history', () => {
     expect(current.urls).toEqual([]);
   });
 
-  it('every catalog timeframe is accepted by its adapter (never a 400)', async () => {
+  it('every native and built timeframe is accepted (never a 400)', async () => {
     upstream = () => new Response('x', { status: 404 }); // any non-400 answer proves the adapter took the timeframe
     for (const info of PROVIDER_CATALOG) {
-      for (const tf of info.timeframes) {
+      for (const tf of [...info.timeframes, ...info.builtTimeframes]) {
         const r = await get(`/api/history?provider=${info.id}&symbol=A&timeframe=${tf}&bars=5`);
         expect(r.status, `${info.id} ${tf}`).not.toBe(400);
       }
     }
+  });
+
+  describe('custom intervals', () => {
+    it('serves 2h from 1h bars', async () => {
+      upstream = () => [kline(0), kline(3_600_000), kline(7_200_000), kline(10_800_000)];
+      const r = await get('/api/history?provider=binance&symbol=BTCUSDT&timeframe=2h&bars=1');
+      expect(r.status).toBe(200);
+      expect(r.body.map((c: { time: number }) => c.time)).toEqual([7200]);
+      expect(current.urls[0]).toContain('interval=1h');
+    });
+    it('refuses a canonical interval that cannot be built, before any upstream call', async () => {
+      const info = PROVIDER_CATALOG.find((p) => p.id === 'coinbase')!;
+      const saved = info.timeframes;
+      info.timeframes = ['1h', '1d'];
+      try {
+        const r = await get('/api/history?provider=coinbase&symbol=BTC-USD&timeframe=7m&bars=5');
+        expect(r.status).toBe(400);
+        expect(r.body.error).toBe('Coinbase does not support timeframe 7m');
+        expect(current.urls).toEqual([]);
+      } finally {
+        info.timeframes = saved;
+      }
+    });
+    it('counts a range with interval seconds and refuses more than the limit', async () => {
+      const r = await get(`/api/history?provider=binance&symbol=BTCUSDT&timeframe=2h&from=0&to=${(MAX_BARS + 1) * 7200}`);
+      expect(r.status).toBe(400);
+      expect(r.body.error).toMatch(/20000/);
+      expect(current.urls).toEqual([]);
+    });
   });
 
   describe('time span', () => {
@@ -177,9 +215,10 @@ describe('GET /api/history', () => {
 
 describe('GET /api/symbols', () => {
   it('returns the list for a provider with one', async () => {
-    const r = await get('/api/symbols?provider=stooq');
+    upstream = () => binanceInfo;
+    const r = await get('/api/symbols?provider=binance');
     expect(r.status).toBe(200);
-    expect(r.body.length).toBeGreaterThan(200);
+    expect(r.body.map((s: { symbol: string }) => s.symbol)).toEqual(['BTCUSDT', 'ETHUSDT', 'SPDRUSDT']);
   });
   it('answers 400 for a provider without a list', async () => {
     const r = await get('/api/symbols?provider=kraken');
@@ -194,13 +233,15 @@ describe('GET /api/search', () => {
     expect(r.body.map((s: { symbol: string }) => s.symbol)).toContain('BTC-USD');
     expect(current.urls).toEqual([]);
   });
-  it('returns the whole list for stooq with an empty query', async () => {
-    const r = await get('/api/search?provider=stooq');
-    expect(r.body.length).toBeGreaterThan(200);
+  it('returns popular symbols for binance with an empty query, without a list call', async () => {
+    const r = await get('/api/search?provider=binance');
+    expect(r.body.map((s: { symbol: string }) => s.symbol)).toContain('BTCUSDT');
+    expect(current.urls).toEqual([]);
   });
   it('searches', async () => {
-    const r = await get('/api/search?provider=stooq&q=spdr');
-    expect(r.body.map((s: { symbol: string }) => s.symbol)).toContain('spy.us');
+    upstream = () => binanceInfo;
+    const r = await get('/api/search?provider=binance&q=spdr');
+    expect(r.body.map((s: { symbol: string }) => s.symbol)).toEqual(['SPDRUSDT']);
   });
   it('answers 400 for an unknown provider', async () => {
     expect((await get('/api/search?provider=x&q=a')).status).toBe(400);
@@ -209,7 +250,7 @@ describe('GET /api/search', () => {
 
 describe('other routes', () => {
   it('the old proxy is gone: 404 listing the real routes', async () => {
-    const r = await get('/api/proxy?url=https%3A%2F%2Fstooq.com%2F');
+    const r = await get('/api/proxy?url=https%3A%2F%2Fexample.com%2F');
     expect(r.status).toBe(404);
     expect(r.body.error).toMatch(/\/api\/history/);
     expect(current.urls).toEqual([]);
@@ -284,5 +325,214 @@ describe('outcome hook (feeds /api/status)', () => {
     const r = await get('/api/history?provider=binance&symbol=NOPE&timeframe=1h&bars=2');
     expect(r.status).toBe(404);
     expect(outcomes).toEqual([]);
+  });
+});
+
+describe('recorded series (candle store)', () => {
+  it('serves a recorded series from the store on the second request, an unrecorded one never', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'vost-api-'));
+    const candles = await openCandleStore({ dir, log: () => undefined });
+    const recorded = new Set(['binance:BTCUSDT:1h']);
+    const srv = http.createServer((req, res) => {
+      const deps = createApiDeps({ fetch: current.fetch, candles, isRecorded: (p, s, t) => recorded.has(`${p}:${s}:${t}`) });
+      void handleApi(req, res, new URL(req.url!, 'http://x'), deps);
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    try {
+      upstream = () => [kline(0), kline(3_600_000)];
+      const q = '/api/history?provider=binance&symbol=BTCUSDT&timeframe=1h&bars=2&to=3600';
+      const first = await (await fetch(url + q)).json();
+      expect(current.urls).toHaveLength(1);
+      expect(candles.stats().rows).toBe(2);
+      const second = await (await fetch(url + q)).json();
+      expect(second).toEqual(first);
+      expect(current.urls).toHaveLength(1); // served from disk
+      await fetch(url + q.replace('BTCUSDT', 'ETHUSDT'));
+      await fetch(url + q.replace('BTCUSDT', 'ETHUSDT'));
+      expect(current.urls).toHaveLength(3); // not recorded: always the exchange
+      expect(candles.stats().rows).toBe(2);
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+      candles.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('built timeframes', () => {
+  /** A Coinbase candles endpoint over a series from time `first` every `step` seconds: one row [time, low, high, open, close, volume] per bar. */
+  const series = (first: number, step: number, count: number) => (u: URL) => {
+    const gran = Number(u.searchParams.get('granularity'));
+    expect(gran).toBe(step);
+    const start = Date.parse(u.searchParams.get('start')!) / 1000;
+    const end = Date.parse(u.searchParams.get('end')!) / 1000;
+    const rows = [];
+    for (let i = count - 1; i >= 0; i--) {
+      const t = first + i * step;
+      if (t >= start && t <= end) rows.push([t, i, i + 10, i + 1, i + 2, 1]);
+    }
+    return rows.slice(0, 300);
+  };
+  const H = 3600;
+  const T0 = Date.UTC(2024, 0, 1) / 1000; // a Monday, aligned to every bucket
+  const times = (body: Array<{ time: number }>) => body.map((c) => c.time);
+
+  it('serves Coinbase 4h in bars mode from 1h, every bar covering its whole bucket', async () => {
+    upstream = series(T0, H, 24 * 10);
+    const to = T0 + 24 * 10 * H - 1;
+    const r = await get(`/api/history?provider=coinbase&symbol=BTC-USD&timeframe=4h&bars=5&to=${to}`);
+    expect(r.status).toBe(200);
+    expect(r.body).toHaveLength(5);
+    expect(times(r.body)).toEqual([55, 56, 57, 58, 59].map((i) => T0 + i * 4 * H));
+    for (const c of r.body) expect(c.volume).toBe(4);
+    expect(current.urls.every((u) => u.includes('granularity=3600'))).toBe(true);
+    expect(current.urls.length).toBeGreaterThan(0);
+  });
+
+  it('serves a span in range mode: exactly the buckets stamped inside it, 1w from 1d', async () => {
+    upstream = series(T0, 86400, 70);
+    const from = T0 + 7 * 86400;
+    const to = T0 + 40 * 86400;
+    const r = await get(`/api/history?provider=coinbase&symbol=BTC-USD&timeframe=1w&from=${from}&to=${to}`);
+    expect(r.status).toBe(200);
+    expect(times(r.body)).toEqual([1, 2, 3, 4, 5].map((w) => T0 + w * 7 * 86400));
+    expect(r.body[0]).toMatchObject({ open: 8, close: 15, low: 7, high: 23, volume: 7 });
+    expect(current.urls.every((u) => u.includes('granularity=86400'))).toBe(true);
+  });
+
+  it('builds calendar months of different lengths from daily bars (Kraken 1M)', async () => {
+    const first = Date.UTC(2023, 0, 1) / 1000;
+    upstream = () => ({
+      error: [],
+      result: { XBTUSD: Array.from({ length: 120 }, (_, i) => [first + i * 86400, '1', '2', '0.5', '1.5', '1', '3', 1]), last: 0 },
+    });
+    const to = first + 119 * 86400;
+    const r = await get(`/api/history?provider=kraken&symbol=XBTUSD&timeframe=1M&bars=3&to=${to}`);
+    expect(r.status).toBe(200);
+    expect(r.body.map((c: { volume: number }) => c.volume)).toEqual([28 * 3, 31 * 3, 30 * 3]); // volume 3 per day: Feb, Mar, and the forming Apr
+    expect(times(r.body)).toEqual([Date.UTC(2023, 1, 1) / 1000, Date.UTC(2023, 2, 1) / 1000, Date.UTC(2023, 3, 1) / 1000]);
+    expect(current.urls[0]).toContain('interval=1440');
+  });
+
+  it('reads past MAX_BARS base bars in chunks, newest first, and stops at the first empty chunk', async () => {
+    const days = 20500;
+    upstream = series(0, 86400, days);
+    const to = (days - 1) * 86400;
+    const r = await get(`/api/history?provider=coinbase&symbol=BTC-USD&timeframe=1M&bars=800&to=${to}`);
+    expect(r.status).toBe(200);
+    expect(r.body.length).toBeGreaterThan(660); // 56 years of months, minus the partial newest
+    expect(times(r.body)).toEqual([...new Set(times(r.body))].sort((a, b) => a - b));
+    expect(r.body[0].time).toBe(0); // the series starts at the start of January 1970, so that oldest bucket is complete and kept
+    expect(new Date(r.body[r.body.length - 1].time * 1000).getUTCDate()).toBe(1);
+  });
+
+  it('answers 404 in the provider wording naming the built timeframe', async () => {
+    upstream = () => [];
+    const span = await get(`/api/history?provider=coinbase&symbol=NOPE&timeframe=4h&from=${T0}&to=${T0 + 86400}`);
+    expect(span.status).toBe(404);
+    expect(span.body.error).toMatch(/^Coinbase has no NOPE 4h data from /);
+    const bars = await get('/api/history?provider=coinbase&symbol=NOPE&timeframe=4h&bars=5');
+    expect(bars.status).toBe(404);
+    expect(bars.body.error).toBe('No data returned for NOPE. Check the symbol (e.g. BTC-USD).');
+  });
+
+  it('keeps the alert evaluator on the lowest native timeframe', () => {
+    for (const info of PROVIDER_CATALOG) expect(info.builtTimeframes).not.toContain(info.timeframes[0]);
+    expect(PROVIDER_CATALOG.find((p) => p.id === 'coinbase')!.timeframes[0]).toBe('1m');
+  });
+
+  it('reads a recorded base series from the candle store for a built request', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'vost-api-'));
+    const candles = await openCandleStore({ dir, log: () => undefined });
+    const srv = http.createServer((req, res) => {
+      const deps = createApiDeps({ fetch: current.fetch, candles, isRecorded: (p, s, t) => `${p}:${s}:${t}` === 'coinbase:BTC-USD:1h' });
+      void handleApi(req, res, new URL(req.url!, 'http://x'), deps);
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
+    try {
+      upstream = series(T0, H, 24 * 10);
+      const q = `/api/history?provider=coinbase&symbol=BTC-USD&timeframe=4h&bars=3&to=${T0 + 24 * 10 * H - 1}`;
+      const first = await (await fetch(url + q)).json();
+      expect(candles.stats().rows).toBeGreaterThan(0);
+      const fetched = current.urls.length;
+      const second = await (await fetch(url + q)).json();
+      expect(second).toEqual(first);
+      expect(current.urls.length).toBe(fetched); // the base series came from disk
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+      candles.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('providerHistory reads a recorded base series through the candle store, without the exchange', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'vost-api-'));
+    const candles = await openCandleStore({ dir, log: () => undefined });
+    const outcomes2: string[] = [];
+    const deps = createApiDeps({
+      fetch: current.fetch,
+      candles,
+      isRecorded: (p, s, t) => `${p}:${s}:${t}` === 'coinbase:BTC-USD:1h',
+      onOutcome: (p, f, r) => outcomes2.push(`${p}:${f}:${r.ok}`),
+    });
+    try {
+      upstream = series(T0, H, 24 * 10);
+      const req = { symbol: 'BTC-USD', timeframe: '1h' as const, bars: 4, from: T0 + 48 * H, to: T0 + 51 * H };
+      const first = await providerHistory(deps, 'coinbase', req);
+      expect(first.map((c) => c.time)).toEqual([T0 + 48 * H, T0 + 49 * H, T0 + 50 * H, T0 + 51 * H]);
+      expect(outcomes2).toContain('coinbase:history:true');
+      const fetched = current.urls.length;
+      expect(await providerHistory(deps, 'coinbase', req)).toEqual(first);
+      expect(current.urls.length).toBe(fetched); // the second read came from disk
+      await expect(providerHistory(deps, 'nope', req)).rejects.toThrow(/Unknown provider/);
+    } finally {
+      candles.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('history source', () => {
+  const H = 3600;
+  const T0 = Date.UTC(2024, 0, 1) / 1000;
+  const hourly = (count: number) => (u: URL) => {
+    expect(u.searchParams.get('interval')).toBe('1h');
+    return Array.from({ length: count }, (_, i) => kline((T0 + i * H) * 1000));
+  };
+
+  it('builds Binance 4h from 1h with source=built', async () => {
+    upstream = hourly(24);
+    const r = await get(`/api/history?provider=binance&symbol=BTCUSDT&timeframe=4h&bars=3&to=${T0 + 24 * H - 1}&source=built`);
+    expect(r.status).toBe(200);
+    expect(r.body.length).toBeGreaterThan(0);
+    for (const c of r.body) expect(c.volume).toBe(36); // four 1h bars of volume 9
+    expect(current.urls.length).toBeGreaterThan(0);
+    expect(current.urls.every((u) => u.includes('interval=1h'))).toBe(true);
+  });
+
+  it('asks Binance 4h natively without the source or with source=native', async () => {
+    upstream = (u) => {
+      expect(u.searchParams.get('interval')).toBe('4h');
+      return [kline(0)];
+    };
+    expect((await get('/api/history?provider=binance&symbol=BTCUSDT&timeframe=4h&bars=1')).status).toBe(200);
+    expect((await get('/api/history?provider=binance&symbol=BTCUSDT&timeframe=4h&bars=1&source=native')).status).toBe(200);
+  });
+
+  it('keeps the lowest native timeframe native with source=built', async () => {
+    upstream = (u) => {
+      expect(u.searchParams.get('interval')).toBe('1m');
+      return [kline(0)];
+    };
+    expect((await get('/api/history?provider=binance&symbol=BTCUSDT&timeframe=1m&bars=1&source=built')).status).toBe(200);
+  });
+
+  it('answers 400 for another source value, without calling upstream', async () => {
+    const r = await get('/api/history?provider=binance&symbol=BTCUSDT&timeframe=1h&bars=1&source=bogus');
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/native or built/);
+    expect(current.urls).toEqual([]);
   });
 });

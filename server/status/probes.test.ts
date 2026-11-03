@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FakeWS, FakeWebSocket, fakeTimers } from '../live/testing.ts';
 import { fakeFetch } from '../providers/testing.ts';
 import { probeHistory, probeLive, probeSymbols, runProbe } from './probes.ts';
@@ -103,9 +103,44 @@ describe('live probe', () => {
     expect(timers.pending).toBe(0);
   });
 
+  it('sends the resolved subscribe of Hyperliquid, looked up through the env fetch', async () => {
+    const { env: e } = env();
+    const f = fakeFetch(() => ({ universe: [{ name: 'BTC' }] }));
+    const p = probeLive('hyperliquid-perps', { ...e, fetch: f.fetch });
+    FakeWS.last.open();
+    await vi.waitFor(() => expect(FakeWS.last.sent).toHaveLength(1));
+    expect(JSON.parse(FakeWS.last.sent[0])).toEqual({ method: 'subscribe', subscription: { type: 'candle', coin: 'BTC', interval: '1h' } });
+    FakeWS.last.message('{"channel":"subscriptionResponse"}');
+    expect(await p).toMatchObject({ ok: true });
+  });
+
+  it('ends with the error when the subscribe lookup fails', async () => {
+    const { env: e } = env();
+    const f = fakeFetch(() => new Response('nope', { status: 418 }));
+    const p = probeLive('hyperliquid-spot', { ...e, fetch: f.fetch });
+    FakeWS.last.open();
+    const r = await p;
+    expect(r.ok === false && r.error).toContain('418');
+    expect(FakeWS.last.closed).toBe(true);
+    expect(FakeWS.last.sent).toEqual([]);
+  });
+
   it('fails for a provider without live data', async () => {
-    expect(await probeLive('coinbase', env().env)).toMatchObject({ ok: false });
+    expect(await probeLive('yahoo', env().env)).toMatchObject({ ok: false });
     expect(FakeWS.instances).toHaveLength(0);
+  });
+
+  it('succeeds for Coinbase on the subscriptions frame, without any REST call', async () => {
+    const { env: e, timers } = env();
+    const spy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('no REST call expected'));
+    const p = probeLive('coinbase', e);
+    FakeWS.last.open();
+    expect(JSON.parse(FakeWS.last.sent[0])).toMatchObject({ type: 'subscribe', channels: ['matches'] });
+    FakeWS.last.message(JSON.stringify({ type: 'subscriptions', channels: [] }));
+    expect((await p).ok).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    expect(timers.pending).toBe(0);
   });
 });
 

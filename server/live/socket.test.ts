@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { LiveLogEvent, LiveStatusEvent } from '../../shared/market.ts';
 import { liveFeed, type LiveFeed } from './feeds.ts';
-import { MAX_ATTEMPTS, SLOW_RETRY_MS, openUpstream, backoffMs } from './socket.ts';
+import { MAX_ATTEMPTS, SLOW_RETRY_MS, SUBSCRIBE_RETRY_MS, openUpstream, backoffMs } from './socket.ts';
 import { FakeWS, FakeWebSocket, fakeTimers } from './testing.ts';
 
 const feedOf = (provider: string, symbol: string, tf: string): LiveFeed => {
@@ -185,5 +185,126 @@ describe('openUpstream', () => {
     expect(timers.pending).toBe(1);
     sock.close();
     expect(timers.pending).toBe(0);
+  });
+});
+
+describe('feed onOpen hook', () => {
+  type Ctx = Parameters<NonNullable<LiveFeed['onOpen']>>[0];
+  function hooked() {
+    const timers = fakeTimers();
+    const opens: Array<{ ctx: Ctx; sent: number }> = [];
+    const klines: number[] = [];
+    const closed: number[] = [];
+    const feed: LiveFeed = {
+      url: 'wss://x',
+      subscribe: 'sub',
+      parse: () => [],
+      onOpen: (ctx) => {
+        opens.push({ ctx, sent: FakeWS.last.sent.length });
+        const n = opens.length;
+        ctx.onClose(() => closed.push(n));
+      },
+    };
+    const sock = openUpstream({
+      feed,
+      WebSocket: FakeWebSocket,
+      timers,
+      label: 'x',
+      onStatus: () => undefined,
+      onKline: (c) => klines.push(c.time),
+      onLog: () => undefined,
+    });
+    return { timers, opens, klines, closed, sock };
+  }
+  const item = (time: number) => [{ candle: { time, open: 1, high: 1, low: 1, close: 1, volume: 1 }, closed: false }];
+
+  it('runs after subscribe on every open, and its emit reaches onKline', () => {
+    const { timers, opens, klines } = hooked();
+    FakeWS.last.open();
+    expect(opens).toHaveLength(1);
+    expect(opens[0].sent).toBe(1); // subscribe was already sent
+    opens[0].ctx.emit(item(1));
+    FakeWS.last.drop();
+    timers.advance(15000);
+    FakeWS.last.open();
+    expect(opens).toHaveLength(2);
+    opens[1].ctx.emit(item(2));
+    expect(klines).toEqual([1, 2]);
+  });
+
+  it('kills emit and runs onClose when the connection drops or the socket is closed', () => {
+    const { timers, opens, klines, closed, sock } = hooked();
+    FakeWS.last.open();
+    FakeWS.last.drop();
+    expect(closed).toEqual([1]);
+    opens[0].ctx.emit(item(1));
+    timers.advance(15000);
+    FakeWS.last.open();
+    sock.close();
+    expect(closed).toEqual([1, 2]);
+    opens[1].ctx.emit(item(2));
+    expect(klines).toEqual([]);
+  });
+});
+
+describe('openUpstream with an async subscribe', () => {
+  const asyncFeed = (subscribe: () => Promise<string>): LiveFeed => ({ url: 'wss://example.test/ws', subscribe, parse: () => [] });
+  const start = (feed: LiveFeed) => {
+    const timers = fakeTimers();
+    const logs: LiveLogEvent[] = [];
+    const sock = openUpstream({ feed, WebSocket: FakeWebSocket, timers, label: 'X 1h', onStatus: () => undefined, onKline: () => undefined, onLog: (e) => logs.push(e) });
+    return { timers, logs, sock };
+  };
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+  };
+
+  it('sends the resolved message after open, and again on reconnect', async () => {
+    let n = 0;
+    const { timers } = start(asyncFeed(async () => `sub-${++n}`));
+    FakeWS.last.open();
+    expect(FakeWS.last.sent).toEqual([]);
+    await flush();
+    expect(FakeWS.last.sent).toEqual(['sub-1']);
+    FakeWS.last.drop();
+    timers.advance(700);
+    FakeWS.last.open();
+    await flush();
+    expect(FakeWS.last.sent).toEqual(['sub-2']);
+  });
+
+  it('does not send once the socket was replaced', async () => {
+    let release: (m: string) => void = () => undefined;
+    const { timers } = start(asyncFeed(() => new Promise<string>((r) => (release = r))));
+    const first = FakeWS.last;
+    first.open();
+    first.drop();
+    timers.advance(700);
+    release('late');
+    await flush();
+    expect(first.sent).toEqual([]);
+    expect(FakeWS.last.sent).toEqual([]);
+  });
+
+  it('logs a failed lookup and retries after 15 s while the socket stays open', async () => {
+    let n = 0;
+    const { timers, logs } = start(
+      asyncFeed(async () => {
+        if (++n === 1) throw new Error('market list unavailable');
+        return 'sub';
+      }),
+    );
+    const ws = FakeWS.last;
+    ws.open();
+    await flush();
+    expect(ws.sent).toEqual([]);
+    expect(logs.some((l) => l.severity === 'error' && l.text.includes('market list unavailable'))).toBe(true);
+    timers.advance(SUBSCRIBE_RETRY_MS - 1);
+    await flush();
+    expect(ws.sent).toEqual([]);
+    timers.advance(1);
+    await flush();
+    expect(ws.sent).toEqual(['sub']);
+    expect(ws.closed).toBe(false);
   });
 });

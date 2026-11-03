@@ -3,18 +3,22 @@
  * are built from the shared catalog in ./index.ts and call the server through
  * ./api.ts; the demo provider lives entirely in the browser.
  */
-import type { Candle, LiveStatus as ServerLiveStatus, SymbolSuggestion, Timeframe } from '../../../../shared/market.ts';
+import type { Candle, LiveStatus as ServerLiveStatus, SymbolSuggestion, Timeframe, Interval } from '../../../../shared/market.ts';
+
+import type { Source } from '../../../../shared/timeframes.ts';
 
 export type { SymbolSuggestion };
 
 export interface HistoryRequest {
   symbol: string;
-  timeframe: Timeframe;
+  timeframe: Interval;
   /** Target number of bars (the provider may return fewer). */
   bars: number;
   /** Time span (unix seconds, both ends inclusive); with `from` the span wins over `bars`. */
   from?: number;
   to?: number;
+  /** `built` asks the server to build higher timeframes from lower ones; absent is the exchange's own bars. */
+  source?: Source;
 }
 
 /** The server's feed states, plus `off` for a stream the client closed. */
@@ -27,6 +31,7 @@ export interface LiveHandle {
 export interface LiveOptions {
   symbol: string;
   timeframe: string;
+  source?: Source;
   onKline: (candle: Candle, isClosed: boolean) => void;
   onStatus: (status: LiveStatus, detail?: string) => void;
   /** One entry per failure, for the in-app message log. */
@@ -43,7 +48,10 @@ export interface DataProvider {
   supportsLive?: boolean;
   /** Opens a realtime candle stream; present only when `supportsLive` is true. */
   startLive?(opts: LiveOptions): LiveHandle;
+  /** Timeframes the provider serves itself plus those the server builds from a lower one. */
   timeframes: Timeframe[];
+  /** The subset of `timeframes` that is built (shown marked in the picker). */
+  builtTimeframes?: Timeframe[];
   defaultTimeframe: Timeframe;
   defaultSymbol: string;
   popularSymbols: SymbolSuggestion[];

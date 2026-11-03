@@ -1,36 +1,52 @@
 /**
- * Global application store (zustand). Owns chart data, indicators, local
- * datasets, live streaming and the backtest/optimizer lifecycle.
+ * Application store (zustand): everything shared by the whole app - layout, preferences, saved datasets,
+ * watchlists, toasts and the inbox - plus the registry of chart stores. A chart's own state (data, indicators,
+ * replay, backtest, live stream) lives in its chart store (./chart); the app and the chart meet in `ChartEnv`.
  *
- * Heavy computations run in a dedicated Web Worker; this module only talks to
- * it over a tiny promise-based message protocol.
+ * `prefs.v1` stays one flat object: the app writes the active chart's fields together with its own.
  */
-import { applyKline, mergeCandles } from '../lib/applyKline';
-import { MAX_BARS, TIMEFRAME_SECONDS } from '../../../shared/market.ts';
+import { DEFAULT_BAR_POS, sanitizeBarPos, sanitizeCursorKind, sanitizeFavorites, sanitizeLastTool, type BarPos, type CursorKind } from '../lib/drawingRail';
 import { create } from 'zustand';
-import type { Candle, Dataset, Timeframe } from '../types';
+import type { Dataset } from '../types';
 import { uid } from '../types';
-import type { BacktestResult, BacktestConfig } from '../lib/backtest/types';
-import { defaultBacktestConfig } from '../lib/backtest/types';
-import type { OptimizeConfig, OptimizeRow, MetricKey } from '../lib/backtest/optimizer';
-import { defaultOptimizeConfig } from '../lib/backtest/optimizer';
-import { runAnyBacktest } from '../lib/backtest/runner';
-import { DEFAULT_PINE_CODE } from '../lib/pine/examples';
-import type { PineInput } from '../lib/pine/types';
-import type { IndicatorKind, IndicatorSpec } from '../lib/indicatorCompute';
-import { defaultIndicator } from '../lib/indicatorCompute';
 import { appendMessage, markAllRead, type InboxMessage, type MessageSeverity } from '../lib/messages';
-import type { PineError, PineInputValue, PineResult, PineRunOutcome } from '../lib/pine/types';
-import type { HistoryRequest, LiveHandle, LiveStatus } from '../lib/providers/http';
+import { sourceBase } from '../../../shared/timeframes.ts';
 import { getProvider, providers, type SymbolSuggestion } from '../lib/providers';
 import { loadJson, saveJson, debounce, removeKey } from '../lib/storage';
-import { fmtTime } from '../lib/format';
 import { browserTimeZone, isValidTimeZone } from '../lib/time';
-import { CHART_MIN_BARS, chartRangeErrorText, cropToChartRange, describeTimeRange, sanitizeTimeRange, sliceByTimeRange, timeRangeErrorText, type TimeRange } from '../lib/timeRange';
+import type { SyncChange } from '../lib/layoutSync';
+import { sanitizeTimeRange } from '../lib/timeRange';
 import * as wl from '../lib/watchlist';
-import { DOCK_DEFAULT, SIDEBAR_DEFAULT, sanitizeStoredSize } from '../lib/paneSizes';
-import { nextPineSelection } from '../lib/pineSelection';
-import type { WorkerRequestBody, WorkerResponse } from '../lib/workers/backtest.worker';
+import { DOCK_DEFAULT, PINE_DEFAULT, SIDEBAR_DEFAULT, sanitizeStoredSize } from '../lib/paneSizes';
+import {
+  DEFAULT_ARRANGEMENT_ID,
+  LAYOUT_KEY,
+  LAYOUT_VERSION,
+  DEFAULT_SYNC,
+  sanitizeSync,
+  type LayoutSync,
+  evenSizes,
+  getArrangement,
+  parseLayout,
+  sanitizeSizes,
+  type LayoutSizes,
+  type LayoutRecord,
+  type ParsedLayout,
+} from '../lib/layouts';
+import type { HistoryLoading } from '../lib/historyPaging';
+import * as sl from '../lib/savedLayouts';
+import { createChartStore, defaultChartInitial, type ChartEnv, type ChartInitial, type ChartStore } from './chart';
+import type { IndicatorSpec } from '../lib/indicatorCompute';
+import type { BacktestConfig } from '../lib/backtest/types';
+import type { Interval } from '../types';
+import { servable, MAX_CUSTOM_TIMEFRAMES, sanitizeCustomTimeframes } from '../lib/customTimeframes';
+import { sanitizeArmed, sanitizeRecent, withRecent } from '../lib/iconSets/prefs';
+import { isGlyphKind } from '../lib/iconSets/types';
+import { sanitizeDefaults } from '../lib/drawingStyle';
+import { toolSettings } from '../components/chart/tools';
+import { canonicalInterval } from '../../../shared/market.ts';
+import type { TimeRange } from '../lib/timeRange';
+
 
 export interface Toast {
   id: string;
@@ -43,23 +59,13 @@ function toastSource(text: string): string {
   return 'Data';
 }
 
-export type DockTab = 'backtest' | 'pine' | 'optimizer' | 'results';
+export type DockTab = 'backtest' | 'optimizer' | 'results';
 
-/** Latest Pine run of one indicator entry. `result` is kept while a newer run is in flight. */
-export interface PineRunState {
-  running: boolean;
-  result?: PineResult;
-  /** The candles `result` was computed on (its values align 1:1 with these). */
-  candles?: Candle[];
-  error?: PineError;
-}
-
-export type LoadState = 'idle' | 'loading' | 'error' | 'ready';
 
 interface Prefs {
   providerId: string;
   symbol: string;
-  timeframe: Timeframe;
+  timeframe: Interval;
   bars: number;
   indicators: IndicatorSpec[];
   btConfig: BacktestConfig;
@@ -67,89 +73,156 @@ interface Prefs {
   timeZone?: string;
   btRange?: TimeRange;
   sidebarWidth?: number;
+  pineWidth?: number;
   dockHeight?: number;
+  sidePanel?: SidePanelSection;
+  sidePanelCollapsed?: boolean;
+  drawingMagnet?: boolean;
+  drawingMagnetStrength?: 'weak' | 'strong';
+  drawingsLocked?: boolean;
+  drawingStayMode?: boolean;
+  drawingsHidden?: boolean;
+  /** The style new drawings of a tool start with, per tool id (see lib/drawingStyle). */
+  drawingDefaults?: Record<string, Record<string, unknown>>;
+  drawingFavorites?: string[];
+  drawingLastTool?: Record<string, string>;
+  glyphArmed?: Record<string, string>;
+  glyphRecent?: Record<string, string[]>;
+  cursorKind?: CursorKind;
+  favoritesBarPos?: BarPos;
+  buildTimeframes?: boolean;
+  historyLoading?: HistoryLoading;
+  customTimeframes?: Interval[];
 }
+
+/** The sections of the right-hand side panel; one shows at a time. */
+export type SidePanelSection = 'watchlist' | 'data' | 'indicators' | 'objects';
+const SIDE_PANEL_SECTIONS: readonly SidePanelSection[] = ['watchlist', 'data', 'indicators', 'objects'];
+
 
 const PREFS_KEY = 'prefs.v1';
 const DATASETS_KEY = 'datasets.v1';
 const MAX_PERSISTED_DATASETS_BYTES = 4_500_000;
 
+const defaultChart = defaultChartInitial();
 const defaultPrefs: Prefs = {
-  providerId: 'binance',
-  symbol: 'BTCUSDT',
-  timeframe: '1h',
-  bars: 5000,
-  indicators: [
-    { ...defaultIndicator('volume'), id: 'ind_volume_default' },
-    { ...defaultIndicator('sma'), params: { length: 20 }, id: 'ind_sma20_default', color: '#f59e0b' },
-  ],
-  btConfig: defaultBacktestConfig(),
-  showTrades: true,
+  providerId: defaultChart.providerId,
+  symbol: defaultChart.symbol,
+  timeframe: defaultChart.timeframe,
+  bars: defaultChart.bars,
+  indicators: defaultChart.indicators,
+  btConfig: defaultChart.btConfig,
+  showTrades: defaultChart.showTrades,
 };
 
+/** A chart's starting state from a saved record (`prefs.v1`, or one chart of `layout.v1`); bad fields fall back. */
+function chartInitialFrom(p: Partial<Prefs>): ChartInitial {
+  // A chart left on a provider that is gone opens on the default market, not on a fallback with the old symbol.
+  const known = providers.some((x) => x.id === p.providerId);
+  return {
+    providerId: known ? (p.providerId as string) : defaultPrefs.providerId,
+    symbol: known ? (p.symbol ?? defaultPrefs.symbol) : defaultPrefs.symbol,
+    timeframe: known ? (typeof p.timeframe === 'string' && canonicalInterval(p.timeframe) === p.timeframe ? p.timeframe : defaultPrefs.timeframe) : defaultPrefs.timeframe,
+    bars: p.bars ?? defaultPrefs.bars,
+    indicators: Array.isArray(p.indicators) && p.indicators.length > 0 ? p.indicators : defaultPrefs.indicators,
+    btConfig: { ...defaultPrefs.btConfig, ...(p.btConfig ?? {}) },
+    showTrades: p.showTrades ?? true,
+    btRange: sanitizeTimeRange(p.btRange),
+  };
+}
+
+/** The id of the one chart the app opens with. */
+export const FIRST_CHART_ID = 'chart-1';
+
+/** The layout as `layout.v1` and every named layout keep it: the arrangement, each chart's own fields, sizes and sync. */
+export function layoutSnapshot(s: Pick<AppState, 'arrangementId' | 'activeChartId' | 'chartOrder' | 'charts' | 'layoutSizes' | 'sync'>): LayoutRecord {
+  return {
+    version: LAYOUT_VERSION,
+    arrangementId: s.arrangementId,
+    activeChartId: s.activeChartId,
+    charts: s.chartOrder.map((id) => {
+      const c = s.charts[id].getState();
+      return {
+        id,
+        providerId: c.providerId,
+        symbol: c.symbol,
+        timeframe: c.timeframe,
+        bars: c.bars,
+        indicators: c.indicators,
+        btConfig: c.btConfig,
+        showTrades: c.showTrades,
+        btRange: c.btRange,
+      };
+    }),
+    sizes: s.layoutSizes,
+    sync: s.sync,
+  };
+}
+
 export interface AppState {
-  /* preferences (persisted) */
-  providerId: string;
-  symbol: string;
-  timeframe: Timeframe;
-  bars: number;
-  indicators: IndicatorSpec[];
-  showTrades: boolean;
   /** IANA zone every date on screen is shown in (candle times stay UTC). */
   timeZone: string;
-  /** Pine run state by indicator id (not persisted). */
-  pineRuns: Record<string, PineRunState>;
   /** Bottom dock UI state (not persisted). */
   dockTab: DockTab;
   dockCollapsed: boolean;
+  /** Whether the Pine editor pane is open (not persisted). */
+  pineOpen: boolean;
   /** Pane sizes in px as the user last set them (persisted); the layout clamps them to the viewport. */
   sidebarWidth: number;
+  pineWidth: number;
   dockHeight: number;
-  selectedPineId: string | null;
+  /** The side panel's visible section and whether it is collapsed to its rail (persisted). */
+  sidePanel: SidePanelSection;
+  sidePanelCollapsed: boolean;
+  drawingMagnet: boolean;
+  /** How far the magnet reaches; an old magnet-on pref loads as weak. */
+  drawingMagnetStrength: 'weak' | 'strong';
+  /** Lock all drawings: none can be moved (their own lock flags are untouched). */
+  drawingsLocked: boolean;
+  /** Stay in drawing mode: the tool stays picked after each drawing. */
+  drawingStayMode: boolean;
+  drawingsHidden: boolean;
+  drawingDefaults: Record<string, Record<string, unknown>>;
+  /** Rail entry keys (see lib/drawingRail.ts) the person starred, in the order the favourites bar shows them. */
+  drawingFavorites: string[];
+  /** The last entry used from each rail family, shown on the family's button. */
+  drawingLastTool: Record<string, string>;
+  /** The icon, emoji or sticker each glyph tool places next (the entry id), by tool id. */
+  glyphArmed: Record<string, string>;
+  /** The last picks of each glyph tool, newest first (up to 16). */
+  glyphRecent: Record<string, string[]>;
+  /** How the cursor mode looks on the chart. */
+  cursorKind: CursorKind;
+  /** Top-left of the floating favourites bar inside the chart area, in px. */
+  favoritesBarPos: BarPos;
+  /** Build every timeframe above the provider's lowest from the next lower native one, instead of the exchange's own bars. */
+  buildTimeframes: boolean;
+  /** How a chart's history loads: the latest page and older pages on scroll, or everything at once. */
+  historyLoading: HistoryLoading;
+  /** Intervals the person added from the timeframe picker (canonical, at most 20; one list for the whole app). */
+  customTimeframes: Interval[];
 
-  /* market data */
-  candles: Candle[];
-  /** Changes whenever the full dataset is replaced (forces a chart rebuild). */
-  dataKey: string;
-  /** Chart range window (UTC seconds) applied to the loaded bars; null = none (not persisted). */
-  chartRange: TimeRange | null;
-  /** The full loaded bars while a chart range crops `candles`; null otherwise. */
-  fullCandles: Candle[] | null;
-  /** True while `fullCandles` is a span fetched from the provider for the chart range. */
-  chartRangeFetched: boolean;
-  dataLabel: string;
-  activeDatasetId: string | null;
-  loadState: LoadState;
+  /** The chart stores by id, and which one the panels outside the chart are bound to. */
+  charts: Record<string, ChartStore>;
+  activeChartId: string;
+  /** The layout: which arrangement (lib/layouts), the chart ids in cell order, and the grid's track sizes. */
+  arrangementId: string;
+  chartOrder: string[];
+  /** Which changes on one chart carry to every chart of the layout (persisted with it). */
+  sync: LayoutSync;
+  layoutSizes: LayoutSizes;
+  /** Counts the times the charts were rebuilt from a layout, so the grid mounts fresh panels for them. */
+  layoutGen: number;
+  /** The named layouts kept in the browser (lib/savedLayouts). */
+  savedLayouts: sl.SavedLayoutsState;
+  /** The working layout differs from the current named layout's saved snapshot. */
+  layoutDirty: boolean;
 
   /* saved local datasets */
   datasets: Dataset[];
 
-  /* live streaming */
-  live: boolean;
-  liveStatus: LiveStatus;
-  liveDetail: string;
-
-  /* backtest */
-  btConfig: BacktestConfig;
-  /** Time window the backtester and optimizer run on (UTC seconds, null = open end). */
-  btRange: TimeRange;
-  btRunning: boolean;
-  btProgress: number;
-  btResult: BacktestResult | null;
-  btError: string | null;
-  /** Inputs declared by the Pine script in the Backtest panel (not persisted). */
-  pineInputs: PineInput[];
-
-  /* optimizer */
-  optConfig: OptimizeConfig;
-  optRunning: boolean;
-  optProgress: number;
-  optResult: { rows: OptimizeRow[]; metric: MetricKey; combos: number; errored: number } | null;
-
   toasts: Toast[];
   messages: InboxMessage[];
-  symbolQuery: string;
-  symbolSuggestions: SymbolSuggestion[];
   /** Full browsable symbol list per provider id, once loaded. */
   symbolCatalog: Record<string, SymbolSuggestion[]>;
   watchlists: wl.WatchlistState;
@@ -178,52 +251,62 @@ export interface AppState {
   /** Imports an exported list; returns an error string or null on success. */
   importWatchlist(json: string): string | null;
   init(): void;
+  /** Writes the working layout into the current named layout. */
+  saveLayout(): void;
+  setAutosave(on: boolean): void;
+  /** Keeps the working layout under a new name and makes that the current layout; false when the name is empty. */
+  copyLayout(name: string): boolean;
+  renameLayout(id: string, name: string): boolean;
+  /** Opens a one-chart layout on the active chart's market and makes it current; false when the name is empty. */
+  createLayout(name: string): boolean;
+  /** Replaces every chart with the named layout's; false when there is none by that id. */
+  openLayout(id: string): boolean;
+  /** Deletes a named layout; the current one is refused (false). */
+  deleteLayout(id: string): boolean;
   /** Run any pending debounced saves (prefs, watchlists, datasets) now. */
   flushPersist(): void;
-  setProvider(id: string): void;
-  /** Switches to a watchlist item's provider and symbol and loads the chart once. */
-  openWatchItem(providerId: string, symbol: string): void;
-  setSymbol(symbol: string, opts?: { load?: boolean }): void;
-  setTimeframe(tf: Timeframe, opts?: { load?: boolean }): void;
-  setBars(bars: number): void;
-  loadData(): Promise<void>;
-  clearData(): void;
-  addDataset(input: { name: string; candles: Candle[]; source: string; description: string; barSeconds: number; barLabel: string }): string;
-  saveCurrentDataset(name?: string): void;
-  activateDataset(id: string): void;
-  removeDataset(id: string): void;
-  /** Adds an indicator and returns its id. */
-  addIndicator(kind: IndicatorKind): string;
-  removeIndicator(id: string): void;
+  /** Shows this arrangement: new charts copy the active chart's market, dropped ones (from the end) are stopped and removed. */
+  setArrangement(id: string): void;
+  /** Makes a chart the one the top bar and panels act on. */
+  setActiveChart(id: string): void;
+  setLayoutSizes(sizes: LayoutSizes): void;
+  setSync(key: keyof LayoutSync, on: boolean): void;
+  /** Turns building higher timeframes from lower ones on or off; reloads every remote chart whose source changes. */
+  setBuildTimeframes(v: boolean): void;
+  setHistoryLoading(v: HistoryLoading): void;
+  /** Saves a custom interval (canonical form assumed); a duplicate or a full list is a no-op. */
+  addCustomTimeframe(iv: Interval): void;
+  /** Forgets a custom interval and moves every chart showing it to its provider's default timeframe. */
+  removeCustomTimeframe(iv: Interval): void;
   setDockTab(tab: DockTab): void;
   setDockCollapsed(collapsed: boolean): void;
   setSidebarWidth(px: number): void;
+  setPineWidth(px: number): void;
+  setSidePanel(section: SidePanelSection): void;
+  setSidePanelCollapsed(collapsed: boolean): void;
   /** Sets the expanded dock height; the collapsed state is untouched. */
   setDockHeight(px: number): void;
-  /** Opens the bottom dock on the Pine tab with this indicator selected. */
+  /** Opens the Pine editor pane with this indicator selected on the active chart. */
   openPineEditor(id: string): void;
-  updateIndicator(id: string, patch: Partial<Pick<IndicatorSpec, 'params' | 'color' | 'visible' | 'source'>> & { inputs?: Record<string, PineInputValue> }): void;
-  setShowTrades(v: boolean): void;
+  closePineEditor(): void;
+  togglePineEditor(): void;
+  setDrawingMagnet(v: boolean): void;
+  setDrawingMagnetStrength(v: 'weak' | 'strong'): void;
+  setDrawingsLocked(v: boolean): void;
+  setDrawingStayMode(v: boolean): void;
+  setDrawingsHidden(v: boolean): void;
+  /** Saves (or with null clears) the style new drawings of a tool start with. */
+  setDrawingDefault(tool: string, style: Record<string, unknown> | null): void;
+  toggleDrawingFavorite(key: string): void;
+  setDrawingLastTool(group: string, key: string): void;
+  /** Arms a glyph tool with an entry and adds it to the tool's recent picks. */
+  pickGlyph(tool: string, id: string): void;
+  setCursorKind(kind: CursorKind): void;
+  setFavoritesBarPos(pos: BarPos): void;
   setTimeZone(tz: string): void;
-  setBtConfig(patch: Partial<BacktestConfig>): void;
-  setBtRange(range: TimeRange): void;
-  /**
-   * Shows a time window of the chart: crops the loaded bars, or fetches the span from the provider
-   * when it lies outside them; an open range clears. Resolves true when applied.
-   */
-  setChartRange(range: TimeRange): Promise<boolean>;
-  clearChartRange(): Promise<void>;
-  runBacktest(): Promise<void>;
-  refreshPineInputs(): Promise<void>;
-  clearBacktest(): void;
-  setOptConfig(patch: Partial<OptimizeConfig>): void;
-  runOptimizer(): Promise<void>;
-  applyOptimizeRow(row: OptimizeRow): Promise<void>;
-  setLive(v: boolean): void;
-  searchSymbols(query: string): Promise<void>;
-  /** Loads the provider's full symbol list once (silent fallback to popular symbols on error). */
-  loadSymbolCatalog(): Promise<void>;
-  /** Adds a suggestion to the active watchlist for the current provider. */
+  /** Loads a provider's full symbol list once (silent fallback to popular symbols on error). */
+  loadSymbolCatalog(providerId: string): Promise<void>;
+  /** Adds a suggestion to the active watchlist for the active chart's provider. */
   addSymbolToWatchlist(s: SymbolSuggestion): void;
   pushToast(kind: Toast['kind'], text: string): void;
   dismissToast(id: string): void;
@@ -232,110 +315,76 @@ export interface AppState {
   clearMessages(): void;
 }
 
-/* ------------------------------------------------------------------ */
-/* Web worker plumbing                                                 */
-/* ------------------------------------------------------------------ */
-
-let worker: Worker | null = null;
-let workerBroken = false;
-const pending = new Map<
-  string,
-  { resolve: (msg: WorkerResponse) => void; reject: (err: Error) => void; onProgress?: (pct: number) => void }
->();
-
-function getWorker(): Worker | null {
-  if (workerBroken) return null;
-  if (worker) return worker;
-  try {
-    worker = new Worker(new URL('../lib/workers/backtest.worker.ts', import.meta.url), { type: 'module' });
-    worker.onmessage = (ev: MessageEvent<WorkerResponse>) => {
-      const msg = ev.data;
-      const p = pending.get(msg.id);
-      if (!p) return;
-      if (msg.type === 'progress') {
-        p.onProgress?.(msg.pct);
-        return;
-      }
-      pending.delete(msg.id);
-      if (msg.type === 'error') p.reject(new Error(msg.message));
-      else p.resolve(msg);
-    };
-    worker.onerror = () => {
-      workerBroken = true;
-      for (const [, p] of pending) p.reject(new Error('Backtest worker crashed — falling back to main thread'));
-      pending.clear();
-      worker = null;
-    };
-    return worker;
-  } catch {
-    workerBroken = true;
-    worker = null;
-    return null;
-  }
-}
-
-function workerCall(req: WorkerRequestBody, onProgress?: (pct: number) => void): Promise<WorkerResponse> {
-  const w = getWorker();
-  const id = uid('req_');
-  if (!w) {
-    // Main-thread fallback (e.g. workers unavailable).
-    return new Promise((resolve, reject) => {
-      try {
-        if (req.type === 'run') {
-          runAnyBacktest(req.candles, req.config).then(
-            (result) => resolve({ id, type: 'result', result }),
-            (err) => reject(err instanceof Error ? err : new Error(String(err))),
-          );
-        } else if (req.type === 'pine') {
-          // No Worker (e.g. tests): run on this thread. Loaded lazily to keep PineTS out of the main bundle.
-          void import('../lib/pine/runtime')
-            .then((m) => m.runPine(req.source, req.candles, req.inputs))
-            .then((outcome) => resolve({ id, type: 'pineResult', outcome }), reject);
-        } else {
-          reject(new Error('Optimizer requires Web Worker support.'));
-        }
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
-  }
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject, onProgress });
-    w.postMessage({ ...req, id });
-  });
-}
-
-/* ------------------------------------------------------------------ */
-/* Live streaming plumbing                                             */
-/* ------------------------------------------------------------------ */
-
-let liveHandle: LiveHandle | null = null;
-/** Bumped by every data load and chart range fetch; only the newest result may be applied. */
-let requestToken = 0;
-/** Bumped whenever a live stream starts or stops, so a late backfill can tell it is stale. */
-let liveSession = 0;
-
-/* ------------------------------------------------------------------ */
-/* Store                                                               */
-/* ------------------------------------------------------------------ */
 
 export const useStore = create<AppState>()((set, get) => {
+  /** The chart the panels outside the chart are bound to. */
+  const activeChart = (): ChartStore => get().charts[get().activeChartId];
+
   const persistPrefs = debounce(() => {
     const s = get();
+    const c = activeChart().getState();
     saveJson(PREFS_KEY, {
-      providerId: s.providerId,
-      symbol: s.symbol,
-      timeframe: s.timeframe,
-      bars: s.bars,
-      indicators: s.indicators,
-      btConfig: s.btConfig,
-      showTrades: s.showTrades,
+      providerId: c.providerId,
+      symbol: c.symbol,
+      timeframe: c.timeframe,
+      bars: c.bars,
+      indicators: c.indicators,
+      btConfig: c.btConfig,
+      showTrades: c.showTrades,
       timeZone: s.timeZone,
-      btRange: s.btRange,
+      btRange: c.btRange,
       sidebarWidth: s.sidebarWidth,
+      pineWidth: s.pineWidth,
       dockHeight: s.dockHeight,
+      sidePanel: s.sidePanel,
+      sidePanelCollapsed: s.sidePanelCollapsed,
+      drawingMagnet: s.drawingMagnet,
+      drawingMagnetStrength: s.drawingMagnetStrength,
+      drawingsLocked: s.drawingsLocked,
+      drawingStayMode: s.drawingStayMode,
+      drawingsHidden: s.drawingsHidden,
+      drawingDefaults: s.drawingDefaults,
+      drawingFavorites: s.drawingFavorites,
+      drawingLastTool: s.drawingLastTool,
+      glyphArmed: s.glyphArmed,
+      glyphRecent: s.glyphRecent,
+      cursorKind: s.cursorKind,
+      favoritesBarPos: s.favoritesBarPos,
+      buildTimeframes: s.buildTimeframes,
+      historyLoading: s.historyLoading,
+      customTimeframes: s.customTimeframes,
     } satisfies Prefs);
   }, 400);
+
+  /** Stores the named layouts and keeps the "unsaved" flag in step with them. */
+  function commitSaved(next: sl.SavedLayoutsState): void {
+    set({ savedLayouts: next });
+    sl.saveSavedLayouts(next);
+    refreshDirty();
+  }
+
+  function refreshDirty(): void {
+    const s = get();
+    const dirty = sl.isDirty(sl.currentEntry(s.savedLayouts), layoutSnapshot(s));
+    if (dirty !== s.layoutDirty) set({ layoutDirty: dirty });
+  }
+
+  const writeLayout = debounce(() => {
+    const s = get();
+    const snapshot = layoutSnapshot(s);
+    saveJson(LAYOUT_KEY, snapshot);
+    if (s.savedLayouts.autosave) {
+      const cur = sl.currentEntry(s.savedLayouts);
+      if (cur && sl.isDirty(cur, snapshot)) commitSaved(sl.writeSnapshot(s.savedLayouts, cur.id, snapshot));
+    }
+    refreshDirty();
+  }, 400);
+
+  /** A layout change: the unsaved flag follows at once, the working copy (and, with autosave on, the current named layout) is written after the debounce. */
+  const persistLayout = () => {
+    refreshDirty();
+    writeLayout();
+  };
 
   const persistWatchlists = debounce(() => {
     wl.saveWatchlists(get().watchlists);
@@ -349,133 +398,174 @@ export const useStore = create<AppState>()((set, get) => {
     }
   }, 600);
 
-  /* ---- Pine runs: one at a time per indicator, results from superseded runs dropped ---- */
-  const pineInflight = new Set<string>();
-  const pineDirty = new Set<string>();
+  /**
+   * Toast texts already shown for the sync being applied: the receiving charts raise the same refusal (live on,
+   * too few bars), and it should reach the person once. Cleared when every pending sync has settled.
+   */
+  const syncToasts = new Set<string>();
+  let syncPending = 0;
 
-  const setPineRun = (id: string, patch: PineRunState | null) => {
-    const next = { ...get().pineRuns };
-    if (patch) next[id] = patch;
-    else delete next[id];
-    set({ pineRuns: next });
-  };
-
-  const runPineIndicator = async (id: string): Promise<void> => {
-    const spec = get().indicators.find((i) => i.id === id);
-    if (!spec || spec.kind !== 'pine') return;
-    const { candles } = get();
-    if (candles.length === 0) return;
-    pineInflight.add(id);
-    pineDirty.delete(id);
-    const prev = get().pineRuns[id];
-    setPineRun(id, { ...prev, running: true });
-    let outcome: PineRunOutcome;
-    try {
-      const res = await workerCall({ type: 'pine', source: spec.source ?? '', candles, inputs: spec.inputs ?? {} });
-      outcome =
-        res.type === 'pineResult' ? res.outcome : { ok: false, error: { message: 'Unexpected worker reply' } };
-    } catch (err) {
-      outcome = { ok: false, error: { message: err instanceof Error ? err.message : String(err) } };
-    }
-    pineInflight.delete(id);
-    if (!get().indicators.some((i) => i.id === id)) {
-      setPineRun(id, null);
-      return;
-    }
-    if (pineDirty.has(id)) {
-      // Source, inputs or candles changed while this ran: its result is stale.
-      void runPineIndicator(id);
-      return;
-    }
-    if (outcome.ok) setPineRun(id, { running: false, result: outcome, candles });
-    else setPineRun(id, { running: false, error: outcome.error });
-  };
-
-  /** (Re)run one pine indicator, or coalesce into the run already in flight. */
-  const schedulePine = (id: string) => {
-    const spec = get().indicators.find((i) => i.id === id);
-    if (!spec || spec.kind !== 'pine' || !spec.visible) return;
-    if (pineInflight.has(id)) pineDirty.add(id);
-    else void runPineIndicator(id);
-  };
-
-  const schedulePineAll = () => {
-    for (const i of get().indicators) if (i.kind === 'pine') schedulePine(i.id);
-  };
-
-  const setCandles = (candles: Candle[], dataLabel: string, activeDatasetId: string | null) => {
-    set({
-      candles,
-      chartRange: null,
-      fullCandles: null,
-      chartRangeFetched: false,
-      dataKey: uid('data_'),
-      dataLabel,
-      activeDatasetId,
-      loadState: 'ready',
-      btResult: null,
-      btError: null,
-      optResult: null,
+  /** Resolves once the chart's load in flight (if any) has finished, so the toast window outlives the receivers' loads. */
+  function loadSettled(chart: ReturnType<typeof get>['charts'][string]): Promise<void> {
+    return new Promise((resolve) => {
+      if (chart.getState().loadState !== 'loading') return resolve();
+      const unsub = chart.subscribe((st) => {
+        if (st.loadState !== 'loading') {
+          unsub();
+          resolve();
+        }
+      });
     });
-    schedulePineAll();
-  };
+  }
 
-  const applyRange = (slice: Candle[], full: Candle[], range: TimeRange, fetched: boolean) => {
-    set({
-      candles: slice,
-      fullCandles: full,
-      chartRange: { from: range.from, to: range.to },
-      chartRangeFetched: fetched,
-      dataKey: uid('data_'),
-      btResult: null,
-      btError: null,
-      optResult: null,
+  /** Applies a change made on chart `sourceId` to every other chart, when its switch is on. Receivers never announce again. */
+  function applySync(sourceId: string, change: SyncChange): void {
+    const s = get();
+    const flag = change.kind === 'range' ? s.sync.dateRange : s.sync[change.kind];
+    if (!flag) return;
+    const others = s.chartOrder.filter((id) => id !== sourceId && s.charts[id]);
+    if (others.length === 0) return;
+    const quiet = { broadcast: false };
+    const pending: Array<Promise<unknown>> = [];
+    const kept: string[] = [];
+    syncPending++;
+    for (const id of others) {
+      const chart = s.charts[id].getState();
+      if (change.kind === 'symbol') {
+        chart.openWatchItem(change.providerId, change.symbol, quiet);
+        pending.push(loadSettled(s.charts[id]));
+      } else if (change.kind === 'interval') {
+        if (servable(getProvider(chart.providerId), change.timeframe)) {
+          chart.setTimeframe(change.timeframe, quiet);
+          pending.push(loadSettled(s.charts[id]));
+        } else kept.push(`Chart ${s.chartOrder.indexOf(id) + 1}`);
+      } else if (change.range) pending.push(chart.setChartRange(change.range, quiet));
+      else pending.push(chart.clearChartRange(quiet));
+    }
+    if (kept.length && change.kind === 'interval') {
+      get().pushToast('info', `${kept.join(', ')} kept their own interval: their data source does not serve ${change.timeframe}.`);
+    }
+    void Promise.allSettled(pending).then(() => {
+      if (--syncPending === 0) syncToasts.clear();
     });
-    schedulePineAll();
+  }
+
+  /** What every chart sees of the app. */
+  const chartEnv: ChartEnv = {
+    pushToast: (kind, text) => {
+      if (syncPending > 0) {
+        if (syncToasts.has(text)) return;
+        syncToasts.add(text);
+      }
+      get().pushToast(kind, text);
+    },
+    pushMessage: (source, severity, text) => get().pushMessage(source, severity, text),
+    timeZone: () => get().timeZone,
+    buildTimeframes: () => get().buildTimeframes,
+    historyLoading: () => get().historyLoading,
+    datasets: () => get().datasets,
+    addDataset(dataset) {
+      if (JSON.stringify(dataset).length > MAX_PERSISTED_DATASETS_BYTES) {
+        get().pushToast('error', 'Dataset too large to persist in the browser (kept for this session only).');
+        set({ datasets: [...get().datasets, dataset] });
+        return;
+      }
+      set({ datasets: [...get().datasets, dataset] });
+      persistDatasets();
+    },
+    removeDataset(id) {
+      set({ datasets: get().datasets.filter((d) => d.id !== id) });
+      persistDatasets();
+    },
+    onPrefsChange: () => {
+      persistPrefs();
+      persistLayout();
+    },
+    onSync: applySync,
   };
 
-  const stopLive = () => {
-    liveSession++;
-    liveHandle?.stop();
-    liveHandle = null;
-    set({ live: false, liveStatus: 'off', liveDetail: '' });
-  };
+  /**
+   * Stops every chart the app has and builds the charts of a layout (else one chart from the saved prefs): the
+   * state fields for them, with the charts not yet loading. Init and opening a named layout both use it.
+   */
+  function buildLayout(layout: ParsedLayout | null, prefs: Prefs) {
+    for (const old of Object.values(get().charts)) old.getState().clearData();
+    const arrangement = layout?.arrangement ?? getArrangement(DEFAULT_ARRANGEMENT_ID)!;
+    const records: Array<Partial<Prefs> & { id?: string }> = layout ? layout.charts : [{ ...prefs, id: FIRST_CHART_ID }];
+    const built = records.map((rec) => {
+      const id = rec.id ?? FIRST_CHART_ID;
+      return [id, createChartStore(id, chartInitialFrom(rec), chartEnv)] as const;
+    });
+    return {
+      charts: Object.fromEntries(built),
+      chartOrder: built.map(([id]) => id),
+      activeChartId: layout?.activeChartId ?? built[0][0],
+      arrangementId: arrangement.id,
+      layoutSizes: layout?.sizes ?? evenSizes(arrangement),
+      sync: layout?.sync ?? DEFAULT_SYNC,
+      layoutGen: get().layoutGen + 1,
+    };
+  }
+
+  /** Makes a layout record the working layout: rebuilds the charts, writes `layout.v1` and the prefs, and loads each chart's data. */
+  function applyLayoutRecord(record: LayoutRecord): void {
+    writeLayout.cancel();
+    const fields = buildLayout(parseLayout(record), defaultPrefs);
+    set(fields);
+    saveJson(LAYOUT_KEY, layoutSnapshot(get()));
+    persistPrefs();
+    for (const chart of Object.values(fields.charts)) void chart.getState().loadData();
+  }
+
+  const firstCharts = { [FIRST_CHART_ID]: createChartStore(FIRST_CHART_ID, defaultChart, chartEnv) };
+  const firstSizes = evenSizes(getArrangement(DEFAULT_ARRANGEMENT_ID)!);
 
   return {
-    ...defaultPrefs,
     timeZone: browserTimeZone(),
-    pineRuns: {},
     dockTab: 'backtest',
     dockCollapsed: false,
     sidebarWidth: SIDEBAR_DEFAULT,
+    pineWidth: PINE_DEFAULT,
+    pineOpen: false,
     dockHeight: DOCK_DEFAULT,
-    selectedPineId: null,
-    candles: [],
-    dataKey: '',
-    chartRange: null,
-    fullCandles: null,
-    chartRangeFetched: false,
-    dataLabel: '',
-    activeDatasetId: null,
-    loadState: 'idle',
+    sidePanel: 'watchlist',
+    sidePanelCollapsed: false,
+    drawingMagnet: false,
+    drawingMagnetStrength: 'weak',
+    drawingsLocked: false,
+    drawingStayMode: false,
+    drawingsHidden: false,
+    drawingDefaults: {},
+    drawingFavorites: [],
+    drawingLastTool: {},
+    glyphArmed: {},
+    glyphRecent: {},
+    cursorKind: 'cross',
+    favoritesBarPos: { ...DEFAULT_BAR_POS },
+    buildTimeframes: false,
+    historyLoading: 'scroll',
+    customTimeframes: [],
+    charts: firstCharts,
+    activeChartId: FIRST_CHART_ID,
+    arrangementId: DEFAULT_ARRANGEMENT_ID,
+    chartOrder: [FIRST_CHART_ID],
+    sync: DEFAULT_SYNC,
+    layoutSizes: firstSizes,
+    layoutGen: 0,
+    savedLayouts: sl.seedFrom(
+      layoutSnapshot({
+        arrangementId: DEFAULT_ARRANGEMENT_ID,
+        activeChartId: FIRST_CHART_ID,
+        chartOrder: [FIRST_CHART_ID],
+        charts: firstCharts,
+        layoutSizes: firstSizes,
+        sync: DEFAULT_SYNC,
+      }),
+    ),
+    layoutDirty: false,
     datasets: [],
-    live: false,
-    liveStatus: 'off',
-    liveDetail: '',
-    pineInputs: [],
-    btRange: { from: null, to: null },
-    btRunning: false,
-    btProgress: 0,
-    btResult: null,
-    btError: null,
-    optConfig: defaultOptimizeConfig(defaultBacktestConfig()),
-    optRunning: false,
-    optProgress: 0,
-    optResult: null,
     toasts: [],
     messages: [],
-    symbolQuery: '',
-    symbolSuggestions: [],
     symbolCatalog: {},
     watchlists: wl.emptyState(),
 
@@ -502,7 +592,7 @@ export const useStore = create<AppState>()((set, get) => {
     setWatchTagColor: (id, color) => get().updateWatchlists((s) => wl.setTagColor(s, id, color)),
     deleteWatchTag: (id) => get().updateWatchlists((s) => wl.deleteTag(s, id)),
     importWatchlist(json) {
-      const res = wl.importList(json, get().watchlists);
+      const res = wl.importList(json, get().watchlists, providers);
       if (typeof res === 'string') return res;
       set({ watchlists: res });
       persistWatchlists();
@@ -511,6 +601,7 @@ export const useStore = create<AppState>()((set, get) => {
 
     flushPersist() {
       persistPrefs.flush();
+      writeLayout.flush();
       persistWatchlists.flush();
       persistDatasets.flush();
     },
@@ -520,172 +611,226 @@ export const useStore = create<AppState>()((set, get) => {
       for (const id of ['binance', 'coinbase', 'kraken', 'bybit', 'okx']) removeKey(`${id}.symbols.v1`);
       const prefs = loadJson<Prefs>(PREFS_KEY, defaultPrefs);
       const datasets = loadJson<Dataset[]>(DATASETS_KEY, []);
+      // The charts are built from the saved layout, else from the saved prefs as one chart: they replace the placeholder the store opened with.
+      const layout = parseLayout(loadJson<unknown>(LAYOUT_KEY, null));
+      const fields = buildLayout(layout, prefs);
       set({
         watchlists: wl.loadWatchlists(providers),
-        providerId: prefs.providerId ?? defaultPrefs.providerId,
-        symbol: prefs.symbol ?? defaultPrefs.symbol,
-        timeframe: prefs.timeframe ?? defaultPrefs.timeframe,
-        bars: prefs.bars ?? defaultPrefs.bars,
-        indicators: Array.isArray(prefs.indicators) && prefs.indicators.length > 0 ? prefs.indicators : defaultPrefs.indicators,
-        btConfig: { ...defaultPrefs.btConfig, ...(prefs.btConfig ?? {}) },
-        showTrades: prefs.showTrades ?? true,
         timeZone: isValidTimeZone(prefs.timeZone) ? prefs.timeZone : browserTimeZone(),
-        btRange: sanitizeTimeRange(prefs.btRange),
         sidebarWidth: sanitizeStoredSize(prefs.sidebarWidth, SIDEBAR_DEFAULT),
+        pineWidth: sanitizeStoredSize(prefs.pineWidth, PINE_DEFAULT),
         dockHeight: sanitizeStoredSize(prefs.dockHeight, DOCK_DEFAULT),
+        sidePanel: SIDE_PANEL_SECTIONS.includes(prefs.sidePanel as SidePanelSection) ? (prefs.sidePanel as SidePanelSection) : 'watchlist',
+        sidePanelCollapsed: typeof prefs.sidePanelCollapsed === 'boolean' ? prefs.sidePanelCollapsed : false,
+        drawingMagnet: prefs.drawingMagnet === true,
+        drawingMagnetStrength: prefs.drawingMagnetStrength === 'strong' ? 'strong' : 'weak',
+        drawingsLocked: prefs.drawingsLocked === true,
+        drawingStayMode: prefs.drawingStayMode === true,
+        drawingsHidden: prefs.drawingsHidden === true,
+        drawingDefaults: sanitizeDefaults(prefs.drawingDefaults, toolSettings),
+        drawingFavorites: sanitizeFavorites(prefs.drawingFavorites),
+        drawingLastTool: sanitizeLastTool(prefs.drawingLastTool),
+        glyphArmed: sanitizeArmed(prefs.glyphArmed),
+        glyphRecent: sanitizeRecent(prefs.glyphRecent),
+        cursorKind: sanitizeCursorKind(prefs.cursorKind),
+        favoritesBarPos: sanitizeBarPos(prefs.favoritesBarPos),
+        buildTimeframes: prefs.buildTimeframes === true,
+        historyLoading: prefs.historyLoading === 'all' ? 'all' : 'scroll',
+        customTimeframes: sanitizeCustomTimeframes(prefs.customTimeframes),
         datasets: Array.isArray(datasets) ? datasets : [],
-        optConfig: defaultOptimizeConfig({ ...defaultPrefs.btConfig, ...(prefs.btConfig ?? {}) }),
+        ...fields,
       });
-      void get().loadData();
+      // The named layouts: the first run, or a corrupt key, makes one "Unnamed" from the working layout (nothing else is touched).
+      const saved = sl.loadSavedLayouts();
+      if (saved) set({ savedLayouts: saved, layoutDirty: sl.isDirty(sl.currentEntry(saved), layoutSnapshot(get())) });
+      else commitSaved(sl.seedFrom(layoutSnapshot(get())));
+      for (const chart of Object.values(fields.charts)) void chart.getState().loadData();
     },
 
-    setProvider(id) {
-      const provider = getProvider(id);
-      stopLive();
-      set({
-        providerId: id,
-        symbol: provider.defaultSymbol,
-        timeframe: provider.defaultTimeframe,
-      });
-      persistPrefs();
-      void get().loadData();
+    saveLayout() {
+      const s = get();
+      const cur = sl.currentEntry(s.savedLayouts);
+      if (!cur) return;
+      writeLayout.flush();
+      commitSaved(sl.writeSnapshot(get().savedLayouts, cur.id, layoutSnapshot(get())));
     },
 
-    openWatchItem(providerId, symbol) {
-      stopLive();
-      set({ providerId, symbol });
-      persistPrefs();
-      void get().loadData();
+    setAutosave(on) {
+      const next = sl.setAutosave(get().savedLayouts, on);
+      if (next === get().savedLayouts) return;
+      commitSaved(next);
+      // Turning it on brings the saved layout up to date, so what it holds is never older than the screen.
+      if (on) get().saveLayout();
     },
 
-    setSymbol(symbol, opts) {
-      set({ symbol });
-      persistPrefs();
-      if (opts?.load) void get().loadData();
+    copyLayout(name) {
+      // Flush first: a pending autosave writes into the saved layouts, and the copy must build on that.
+      writeLayout.flush();
+      const next = sl.copyLayout(get().savedLayouts, name, layoutSnapshot(get()));
+      if (next === get().savedLayouts) return false;
+      commitSaved(next);
+      return true;
     },
 
-    setTimeframe(tf, opts) {
-      stopLive();
-      set({ timeframe: tf });
-      persistPrefs();
-      if (opts?.load !== false) void get().loadData();
+    renameLayout(id, name) {
+      const next = sl.renameLayout(get().savedLayouts, id, name);
+      if (next === get().savedLayouts) return false;
+      commitSaved(next);
+      return true;
     },
 
-    setBars(bars) {
-      set({ bars });
-      persistPrefs();
-    },
-
-    async loadData() {
-      const { providerId, symbol, timeframe, bars } = get();
-      const provider = getProvider(providerId);
-      const tf = provider.timeframes.includes(timeframe) ? timeframe : provider.defaultTimeframe;
-      const token = ++requestToken;
-      set({ loadState: 'loading', timeframe: tf });
-      try {
-        const candles = await provider.fetchHistory({ symbol, timeframe: tf, bars });
-        if (token !== requestToken) return; // a newer load or range fetch owns the data now
-        if (candles.length < 2) throw new Error(`Not enough data returned for ${symbol}.`);
-        setCandles(candles, `${provider.name} · ${symbol} · ${tf}`, null);
-        const s = get();
-        if (s.live && provider.startLive) s.setLive(true); // reconnect for the new symbol/tf
-        else if (s.live) s.setLive(false);
-      } catch (err) {
-        if (token !== requestToken) return;
-        set({ loadState: 'error' });
-        get().pushToast('error', `Could not load data: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    },
-
-    clearData() {
-      stopLive();
-      set({
-        candles: [],
-        chartRange: null,
-        fullCandles: null,
-        chartRangeFetched: false,
-        dataKey: uid('data_'),
-        dataLabel: '',
-        activeDatasetId: null,
-        loadState: 'idle',
-        btResult: null,
-        btError: null,
-        optResult: null,
-      });
-    },
-
-    addDataset(input) {
-      const dataset: Dataset = {
-        id: uid('ds_'),
-        createdAt: Date.now(),
-        ...input,
+    createLayout(name) {
+      if (!sl.cleanName(name)) return false;
+      if (get().savedLayouts.autosave) writeLayout.flush();
+      const from = activeChart().getState();
+      const id = FIRST_CHART_ID;
+      const record: LayoutRecord = {
+        version: LAYOUT_VERSION,
+        arrangementId: DEFAULT_ARRANGEMENT_ID,
+        activeChartId: id,
+        charts: [
+          {
+            id,
+            providerId: from.providerId,
+            symbol: from.symbol,
+            timeframe: from.timeframe,
+            bars: from.bars,
+            indicators: defaultChart.indicators,
+            btConfig: defaultChart.btConfig,
+            showTrades: defaultChart.showTrades,
+          },
+        ],
+        sizes: evenSizes(getArrangement(DEFAULT_ARRANGEMENT_ID)!),
+        sync: DEFAULT_SYNC,
       };
-      const size = JSON.stringify(dataset).length;
-      if (size > MAX_PERSISTED_DATASETS_BYTES) {
-        get().pushToast('error', 'Dataset too large to persist in the browser (kept for this session only).');
-        set({ datasets: [...get().datasets, dataset], activeDatasetId: dataset.id });
-        setCandles(dataset.candles, `Local · ${dataset.name}`, dataset.id);
-        return dataset.id;
+      applyLayoutRecord(record);
+      // The entry holds what the rebuilt charts say, so it starts out saved.
+      commitSaved(sl.createLayout(get().savedLayouts, name, layoutSnapshot(get())));
+      return true;
+    },
+
+    openLayout(id) {
+      const target = get().savedLayouts.layouts.find((l) => l.id === id);
+      if (!target) return false;
+      if (id === get().savedLayouts.currentId) return true;
+      // With autosave on the pending change reaches the layout being left first; with it off the person was asked.
+      if (get().savedLayouts.autosave) writeLayout.flush();
+      commitSaved(sl.setCurrent(get().savedLayouts, id));
+      applyLayoutRecord(target.layout);
+      refreshDirty();
+      return true;
+    },
+
+    deleteLayout(id) {
+      const next = sl.deleteLayout(get().savedLayouts, id);
+      if (next === get().savedLayouts) return false;
+      commitSaved(next);
+      return true;
+    },
+
+    setArrangement(id) {
+      const arrangement = getArrangement(id);
+      const s = get();
+      if (!arrangement || arrangement.id === s.arrangementId) return;
+      const charts = { ...s.charts };
+      let order = [...s.chartOrder];
+      const created: ChartStore[] = [];
+      if (arrangement.count > order.length) {
+        const from = activeChart().getState();
+        while (order.length < arrangement.count) {
+          const cid = uid('chart-');
+          const store = createChartStore(
+            cid,
+            { ...defaultChartInitial(), providerId: from.providerId, symbol: from.symbol, timeframe: from.timeframe, bars: from.bars },
+            chartEnv,
+          );
+          charts[cid] = store;
+          created.push(store);
+          order.push(cid);
+        }
+      } else {
+        for (const cid of order.slice(arrangement.count)) {
+          charts[cid].getState().clearData();
+          delete charts[cid];
+        }
+        order = order.slice(0, arrangement.count);
       }
-      set({ datasets: [...get().datasets, dataset], activeDatasetId: dataset.id });
-      persistDatasets();
-      setCandles(dataset.candles, `Local · ${dataset.name}`, dataset.id);
-      return dataset.id;
-    },
-
-    saveCurrentDataset(name) {
-      const { candles: shown, fullCandles, dataLabel, activeDatasetId, providerId } = get();
-      const candles = fullCandles ?? shown;
-      if (candles.length === 0) {
-        get().pushToast('info', 'Nothing to save — load some data first.');
-        return;
-      }
-      if (activeDatasetId && get().datasets.some((d) => d.id === activeDatasetId)) {
-        get().pushToast('info', 'This dataset is already in your library.');
-        return;
-      }
-      get().addDataset({
-        name: name ?? `${dataLabel || 'Dataset'} · ${fmtTime(Date.now() / 1000, { dateOnly: true, timeZone: get().timeZone })}`,
-        candles,
-        source: providerId,
-        description: dataLabel,
-        barSeconds: 0,
-        barLabel: '',
-      });
-      get().pushToast('success', 'Saved to your local library — available offline.');
-    },
-
-    activateDataset(id) {
-      const ds = get().datasets.find((d) => d.id === id);
-      if (!ds) return;
-      stopLive();
-      setCandles(ds.candles, `Local · ${ds.name}`, ds.id);
-      get().pushToast('info', `Loaded "${ds.name}" (${ds.candles.length} bars) — charting works fully offline.`);
-    },
-
-    removeDataset(id) {
-      const next = get().datasets.filter((d) => d.id !== id);
-      set({ datasets: next, activeDatasetId: get().activeDatasetId === id ? null : get().activeDatasetId });
-      persistDatasets();
-    },
-
-    addIndicator(kind) {
-      const indicators = [...get().indicators, defaultIndicator(kind)];
-      set({ indicators });
-      persistPrefs();
-      const id = indicators[indicators.length - 1].id;
-      if (kind === 'pine') schedulePine(id);
-      return id;
-    },
-
-    removeIndicator(id) {
-      const before = get().indicators;
       set({
-        indicators: before.filter((i) => i.id !== id),
-        selectedPineId: nextPineSelection(before, get().selectedPineId, id),
+        arrangementId: arrangement.id,
+        chartOrder: order,
+        charts,
+        activeChartId: order.includes(s.activeChartId) ? s.activeChartId : order[0],
+        layoutSizes: evenSizes(arrangement),
       });
-      setPineRun(id, null);
+      for (const store of created) void store.getState().loadData();
       persistPrefs();
+      persistLayout();
+    },
+
+    setActiveChart(id) {
+      if (!get().charts[id] || id === get().activeChartId) return;
+      set({ activeChartId: id });
+      persistPrefs();
+      persistLayout();
+    },
+
+    setSync(key, on) {
+      if (get().sync[key] === on) return;
+      set({ sync: sanitizeSync({ ...get().sync, [key]: on }) });
+      persistLayout();
+    },
+
+    setLayoutSizes(sizes) {
+      const arrangement = getArrangement(get().arrangementId);
+      if (!arrangement) return;
+      set({ layoutSizes: sanitizeSizes(sizes, arrangement) });
+      persistLayout();
+    },
+
+    setHistoryLoading(v) {
+      const was = get().historyLoading;
+      const next = v === 'all' ? 'all' : 'scroll';
+      set({ historyLoading: next });
+      persistPrefs();
+      if (was === next) return;
+      // The mode changes how many bars a load asks for; a dataset, a chart range and a replay never follow it.
+      for (const chart of Object.values(get().charts)) {
+        const { activeDatasetId, chartRange, replay } = chart.getState();
+        if (activeDatasetId != null || chartRange != null || replay != null) continue;
+        void chart.getState().loadData();
+      }
+    },
+
+    setBuildTimeframes(v) {
+      const was = get().buildTimeframes;
+      set({ buildTimeframes: v });
+      persistPrefs();
+      if (was === v) return;
+      for (const chart of Object.values(get().charts)) {
+        const { providerId, timeframe, activeDatasetId } = chart.getState();
+        const provider = getProvider(providerId);
+        if (provider.offline || activeDatasetId != null) continue;
+        const native = provider.timeframes.filter((tf) => !(provider.builtTimeframes ?? []).includes(tf));
+        if (sourceBase(native, timeframe, 'native') === sourceBase(native, timeframe, 'built')) continue;
+        void chart.getState().loadData(); // keeps Live on: it stays set and loadData reconnects it
+      }
+    },
+
+    addCustomTimeframe(iv) {
+      const list = get().customTimeframes;
+      if (list.includes(iv) || list.length >= MAX_CUSTOM_TIMEFRAMES) return;
+      set({ customTimeframes: [...list, iv] });
+      persistPrefs();
+    },
+
+    removeCustomTimeframe(iv) {
+      set({ customTimeframes: get().customTimeframes.filter((x) => x !== iv) });
+      persistPrefs();
+      for (const chart of Object.values(get().charts)) {
+        const { timeframe, providerId, activeDatasetId } = chart.getState();
+        if (timeframe !== iv) continue;
+        chart.getState().setTimeframe(getProvider(providerId).defaultTimeframe, { load: activeDatasetId == null, broadcast: false });
+      }
     },
 
     setDockTab(tab) {
@@ -701,30 +846,38 @@ export const useStore = create<AppState>()((set, get) => {
       persistPrefs();
     },
 
+    setPineWidth(px) {
+      set({ pineWidth: sanitizeStoredSize(px, PINE_DEFAULT) });
+      persistPrefs();
+    },
+
+    setSidePanel(section) {
+      if (!SIDE_PANEL_SECTIONS.includes(section)) return;
+      set({ sidePanel: section });
+      persistPrefs();
+    },
+
+    setSidePanelCollapsed(collapsed) {
+      set({ sidePanelCollapsed: collapsed === true });
+      persistPrefs();
+    },
+
     setDockHeight(px) {
       set({ dockHeight: sanitizeStoredSize(px, DOCK_DEFAULT) });
       persistPrefs();
     },
 
     openPineEditor(id) {
-      set({ dockTab: 'pine', selectedPineId: id, dockCollapsed: false });
+      activeChart().setState({ selectedPineId: id });
+      set({ pineOpen: true });
     },
 
-    updateIndicator(id, patch) {
-      set({
-        indicators: get().indicators.map((i) =>
-          i.id === id
-            ? {
-                ...i,
-                ...patch,
-                params: { ...i.params, ...(patch.params ?? {}) },
-                ...(i.kind === 'pine' && { inputs: { ...(i.inputs ?? {}), ...(patch.inputs ?? {}) } }),
-              }
-            : i,
-        ),
-      });
-      persistPrefs();
-      if (patch.source !== undefined || patch.inputs !== undefined || patch.visible === true) schedulePine(id);
+    closePineEditor() {
+      set({ pineOpen: false });
+    },
+
+    togglePineEditor() {
+      set((s) => ({ pineOpen: !s.pineOpen }));
     },
 
     setTimeZone(tz) {
@@ -733,293 +886,75 @@ export const useStore = create<AppState>()((set, get) => {
       persistPrefs();
     },
 
-    setShowTrades(v) {
-      set({ showTrades: v });
+    setDrawingMagnet(v) {
+      set({ drawingMagnet: v });
       persistPrefs();
     },
 
-    setBtConfig(patch) {
-      const btConfig = { ...get().btConfig, ...patch };
-      set({ btConfig });
+    setDrawingMagnetStrength(v) {
+      set({ drawingMagnetStrength: v });
       persistPrefs();
     },
 
-    setBtRange(range) {
-      set({ btRange: sanitizeTimeRange(range) });
+    setDrawingsLocked(v) {
+      set({ drawingsLocked: v });
       persistPrefs();
     },
 
-    async setChartRange(range) {
-      const state = get();
-      const full = state.fullCandles ?? state.candles;
-      const open = range.from == null && range.to == null;
-      if (open) {
-        await get().clearChartRange();
-        return true;
-      }
-      if (state.live) {
-        state.pushToast('error', 'Turn live off before cropping the chart: live bars land at the end of the full data.');
-        return false;
-      }
-      const crop = cropToChartRange(full, range);
-      if (crop.ok) {
-        applyRange(crop.slice, full, range, state.chartRangeFetched);
-        return true;
-      }
-      if (crop.error !== 'outside' || state.activeDatasetId != null) {
-        state.pushToast('error', chartRangeErrorText(crop.error));
-        return false;
-      }
-
-      // outside the provider's loaded bars: fetch that span
-      const { providerId, symbol, timeframe, bars } = state;
-      const provider = getProvider(providerId);
-      const token = ++requestToken;
-      const req: HistoryRequest = { symbol, timeframe, bars };
-      if (range.from != null) req.from = range.from;
-      if (range.to != null) req.to = range.to;
-      set({ loadState: 'loading' });
-      try {
-        const fetched = await provider.fetchHistory(req);
-        const now = get();
-        if (token !== requestToken || now.providerId !== providerId || now.symbol !== symbol || now.activeDatasetId != null || now.timeframe !== timeframe) {
-          return false; // stale: the user moved on, a newer request owns the state
-        }
-        const slice = sliceByTimeRange(fetched, range);
-        if (slice.length < CHART_MIN_BARS) {
-          set({ loadState: 'ready' });
-          now.pushToast('error', chartRangeErrorText('too-few-bars'));
-          return false;
-        }
-        applyRange(slice, fetched, range, true);
-        set({ loadState: 'ready' });
-        if (range.from != null && slice[0].time - range.from > TIMEFRAME_SECONDS[timeframe]) {
-          const date = fmtTime(slice[0].time, { timeZone: get().timeZone });
-          const text = `${provider.name} has data for this range only from ${date}`;
-          get().pushMessage(provider.name, 'warning', text);
-          get().pushToast('info', text);
-        }
-        return true;
-      } catch (err) {
-        if (token !== requestToken) return false;
-        set({ loadState: 'ready' });
-        get().pushToast('error', `Could not load range: ${err instanceof Error ? err.message : String(err)}`);
-        return false;
-      }
+    setDrawingStayMode(v) {
+      set({ drawingStayMode: v });
+      persistPrefs();
     },
 
-    async clearChartRange() {
-      const { fullCandles, chartRangeFetched } = get();
-      if (!fullCandles) return;
-      if (chartRangeFetched) {
-        await get().loadData(); // back to the latest bars; setCandles resets the range state
-        return;
-      }
-      set({
-        candles: fullCandles,
-        fullCandles: null,
-        chartRange: null,
-        dataKey: uid('data_'),
-        btResult: null,
-        btError: null,
-        optResult: null,
-      });
-      schedulePineAll();
+    setDrawingsHidden(v) {
+      set({ drawingsHidden: v });
+      persistPrefs();
     },
 
-    async runBacktest() {
-      const { candles: all, btConfig, btRange } = get();
-      if (all.length < 3) {
-        get().pushToast('error', 'Load some data before running a backtest.');
-        return;
-      }
-      const { slice: candles, error } = describeTimeRange(all, btRange);
-      if (error) {
-        get().pushToast('error', timeRangeErrorText(error));
-        return;
-      }
-      set({ btRunning: true, btProgress: 0, btError: null });
-      try {
-        const t0 = performance.now();
-        const msg = await workerCall({ type: 'run', candles, config: btConfig });
-        if (msg.type !== 'result') throw new Error('Unexpected worker reply');
-        const ms = Math.round(performance.now() - t0);
-        set({ btResult: msg.result, btRunning: false, btProgress: 1 });
-        get().pushToast(
-          'success',
-          `Backtest finished in ${ms} ms — ${msg.result.trades.length} trade(s), ${candles.length} bars.`,
-        );
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        set({ btRunning: false, btError: message });
-        get().pushToast('error', `Backtest failed: ${message}`);
-      }
+    setDrawingDefault(tool, style) {
+      const fields = toolSettings(tool);
+      if (!fields) return;
+      const next = { ...get().drawingDefaults };
+      delete next[tool];
+      const valid = style ? sanitizeDefaults({ [tool]: style }, toolSettings)[tool] : undefined;
+      if (valid) next[tool] = valid;
+      set({ drawingDefaults: next });
+      persistPrefs();
     },
 
-    async refreshPineInputs() {
-      const { candles, btConfig } = get();
-      if (btConfig.strategyId !== 'pine' || candles.length === 0) {
-        if (get().pineInputs.length > 0) set({ pineInputs: [] });
-        return;
-      }
-      try {
-        // Input declarations do not depend on the data; a short slice keeps this cheap.
-        const msg = await workerCall({
-          type: 'pine',
-          source: btConfig.pineCode ?? DEFAULT_PINE_CODE,
-          candles: candles.slice(0, 60),
-        });
-        if (msg.type !== 'pineResult') throw new Error('Unexpected worker reply');
-        set({ pineInputs: msg.outcome.ok ? msg.outcome.inputs : [] });
-      } catch {
-        set({ pineInputs: [] });
-      }
+    toggleDrawingFavorite(key) {
+      const cur = get().drawingFavorites;
+      const next = cur.includes(key) ? cur.filter((k) => k !== key) : sanitizeFavorites([...cur, key]);
+      set({ drawingFavorites: next });
+      persistPrefs();
     },
 
-    clearBacktest() {
-      set({ btResult: null, btError: null });
+    setDrawingLastTool(group, key) {
+      const cur = get().drawingLastTool;
+      const next = sanitizeLastTool({ ...cur, [group]: key });
+      if (next[group] !== key) return; // not an entry of that family
+      set({ drawingLastTool: { ...cur, [group]: key } });
+      persistPrefs();
     },
 
-    setOptConfig(patch) {
-      set({ optConfig: { ...get().optConfig, ...patch } });
+    pickGlyph(tool, id) {
+      if (!isGlyphKind(tool) || !id) return;
+      const { glyphArmed, glyphRecent } = get();
+      set({ glyphArmed: { ...glyphArmed, [tool]: id }, glyphRecent: sanitizeRecent({ ...glyphRecent, [tool]: withRecent(glyphRecent[tool], id) }) });
+      persistPrefs();
     },
 
-    async runOptimizer() {
-      const { candles: all, btConfig, optConfig, btRange } = get();
-      if (all.length < 3) {
-        get().pushToast('error', 'Load some data before optimizing.');
-        return;
-      }
-      const { slice: candles, error } = describeTimeRange(all, btRange);
-      if (error) {
-        get().pushToast('error', timeRangeErrorText(error));
-        return;
-      }
-      set({ optRunning: true, optProgress: 0, optResult: null });
-      try {
-        const msg = await workerCall({ type: 'optimize', candles, config: btConfig, optimize: optConfig }, (pct) => {
-          set({ optProgress: pct });
-        });
-        if (msg.type !== 'optimizeResult') throw new Error('Unexpected worker reply');
-        set({
-          optResult: { rows: msg.rows, metric: msg.metric, combos: msg.combos, errored: msg.errored },
-          optRunning: false,
-          optProgress: 1,
-        });
-        if (msg.errored > 0) {
-          get().pushToast('error', `${msg.errored} of ${msg.combos} parameter combinations failed (see custom code).`);
-        }
-      } catch (err) {
-        set({ optRunning: false });
-        get().pushToast('error', `Optimizer failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+    setCursorKind(kind) {
+      set({ cursorKind: sanitizeCursorKind(kind) });
+      persistPrefs();
     },
 
-    async applyOptimizeRow(row) {
-      get().setBtConfig({ params: { ...get().btConfig.params, ...row.params } });
-      await get().runBacktest();
+    setFavoritesBarPos(pos) {
+      set({ favoritesBarPos: sanitizeBarPos(pos) });
+      persistPrefs();
     },
 
-    setLive(v) {
-      const { providerId, symbol, timeframe } = get();
-      const provider = getProvider(providerId);
-      if (!v) {
-        stopLive();
-        return;
-      }
-      if (!provider.startLive) {
-        get().pushToast('info', `Live streaming is not available for ${provider.name} data.`);
-        return;
-      }
-      if (get().chartRangeFetched) {
-        // a fetched span is not the latest bars: reload them, which reconnects live
-        set({ live: true, liveStatus: 'connecting', liveDetail: '' });
-        void get().loadData().then(() => {
-          if (get().loadState === 'error') stopLive();
-        });
-        return;
-      }
-      void get().clearChartRange(); // live bars land at the end of the full data
-      liveSession++;
-      const session = liveSession;
-      liveHandle?.stop();
-      set({ live: true, liveStatus: 'connecting', liveDetail: '' });
-
-      // After an outage (the exchange feed or the connection to the server) the stream
-      // resumes at the current bar: fetch what was missed once and merge it by time.
-      let backfilling = false;
-      const backfill = async (): Promise<void> => {
-        const last = get().candles[get().candles.length - 1];
-        if (!last || backfilling) return;
-        backfilling = true;
-        const dataKey = get().dataKey;
-        const elapsed = Math.floor((Date.now() / 1000 - last.time) / (TIMEFRAME_SECONDS[timeframe] ?? 60));
-        const bars = Math.min(MAX_BARS, Math.max(2, elapsed + 2));
-        try {
-          const recent = await provider.fetchHistory({ symbol, timeframe, bars });
-          if (session !== liveSession || get().dataKey !== dataKey) return; // stopped or switched meanwhile
-          set({ candles: mergeCandles(get().candles, recent) });
-          schedulePineAll();
-        } catch (err) {
-          if (session !== liveSession) return;
-          get().pushMessage(
-            'Live',
-            'warning',
-            `Live data came back for ${symbol} ${timeframe}, but the bars missed meanwhile could not be loaded (${err instanceof Error ? err.message : String(err)}). The chart may have a gap; reload the data to fill it.`,
-          );
-        } finally {
-          backfilling = false;
-        }
-      };
-
-      // A drop can surface as reconnecting -> connecting -> live (the server relay opens a fresh upstream
-      // entry, so its first status is 'connecting'), so remember any disruption, not just the status before live.
-      let wasLive = false;
-      let disrupted = false;
-      liveHandle = provider.startLive({
-        symbol,
-        timeframe,
-        onLog: (severity, text) => get().pushMessage('Live', severity, text),
-        onStatus: (status, detail) => {
-          set({ liveStatus: status, liveDetail: detail ?? '', live: status !== 'off' });
-          if (status === 'reconnecting' || status === 'error' || (status === 'connecting' && wasLive)) disrupted = true;
-          if (status === 'live') {
-            if (disrupted) void backfill();
-            disrupted = false;
-            wasLive = true;
-          }
-        },
-        onKline: (candle, closed) => {
-          const prev = get().candles;
-          const next = applyKline(prev, candle);
-          if (next !== prev) {
-            set({ candles: next });
-            schedulePineAll();
-          }
-          if (closed && get().showTrades && get().btResult) {
-            /* keep backtest results untouched; user re-runs manually */
-          }
-        },
-      });
-    },
-
-    async searchSymbols(query) {
-      const provider = getProvider(get().providerId);
-      set({ symbolQuery: query });
-      if (!provider.searchSymbols) {
-        set({ symbolSuggestions: provider.popularSymbols });
-        return;
-      }
-      try {
-        const suggestions = await provider.searchSymbols(query);
-        if (get().symbolQuery === query) set({ symbolSuggestions: suggestions });
-      } catch {
-        set({ symbolSuggestions: provider.popularSymbols });
-      }
-    },
-
-    async loadSymbolCatalog() {
-      const providerId = get().providerId;
+    async loadSymbolCatalog(providerId) {
       if (get().symbolCatalog[providerId]) return;
       const provider = getProvider(providerId);
       if (!provider.listSymbols) return;
@@ -1034,7 +969,8 @@ export const useStore = create<AppState>()((set, get) => {
     },
 
     addSymbolToWatchlist(sug) {
-      const { watchlists, providerId } = get();
+      const { watchlists } = get();
+      const { providerId } = activeChart().getState();
       const list = watchlists.lists.find((l) => l.id === watchlists.activeListId);
       if (!list) return;
       const exists = list.sections.some((sec) =>
@@ -1076,7 +1012,8 @@ export const useStore = create<AppState>()((set, get) => {
   };
 });
 
-/** Convenience selector used by several components. */
-export function useActiveBarCount(): number {
-  return useStore((s) => s.candles.length);
+/** The chart the panels outside the chart are bound to, for imperative callers. */
+export function getActiveChart(): ChartStore {
+  const s = useStore.getState();
+  return s.charts[s.activeChartId];
 }

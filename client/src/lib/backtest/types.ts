@@ -7,12 +7,22 @@
  * enabled in the configuration.
  */
 
+import type { PineMarket } from '../pine/types';
+
+/** The step a running backtest is in, reported with its progress. */
+export type BacktestStage = 'signals' | 'simulating' | 'pine' | 'metrics';
+
+/** Progress of a run: `pct` is 0..1 and never decreases; the last call is 1. */
+export type BacktestProgress = (pct: number, stage: BacktestStage) => void;
+
 /** Desired exposure for a bar: 1 long, -1 short, 0 flat, null = "not computed yet". */
 export type Signal = -1 | 0 | 1 | null;
 
 export interface BacktestConfig {
   strategyId: string;
   params: Record<string, number>;
+  /** Only for the `pine` strategy: the text inputs (color, source, symbol, session, timeframe, string, text_area, string enums) by name. Numbers, times and bools live in `params`. */
+  pineInputs?: Record<string, string>;
   /** Only for the `custom` strategy. */
   customCode?: string;
   /** Only for the `pine` strategy: Pine Script v6 strategy source. */
@@ -29,6 +39,8 @@ export interface BacktestConfig {
   stopLossPct: number | null;
   /** Take profit distance in percent (null disables). */
   takeProfitPct: number | null;
+  /** Pine only: the chart's symbol, timeframe and market details. Added when a run is requested, never saved. */
+  market?: PineMarket;
 }
 
 export type ExitReason = 'signal' | 'stop_loss' | 'take_profit' | 'end_of_data';
@@ -87,6 +99,8 @@ export interface BacktestResult {
   trades: Trade[];
   equity: EquityPoint[];
   metrics: Metrics;
+  /** Buy and hold equity per bar (same length as `equity`), ignoring fees and slippage. */
+  buyHold: number[];
   config: BacktestConfig;
   signals?: Signal[];
 }

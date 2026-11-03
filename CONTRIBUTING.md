@@ -27,13 +27,15 @@ Useful scripts:
 | Path | Contents |
 |---|---|
 | `client/src/components/` | React UI (chart panel, top bar, dock, CSV modal, …); every pane and who owns its data: [UI audit](docs/spikes/ui-audit/README.md) |
-| `client/src/state/store.ts` | zustand store — owns data, indicators, datasets, backtest lifecycle |
+| `client/src/state/store.ts` | app zustand store — prefs, layout, datasets, watchlists, toasts; holds the chart stores |
+| `client/src/state/chart.ts` | chart store (`createChartStore`) — one chart's data, indicators, replay, backtest, live stream |
 | `client/src/lib/providers/` | Provider registry (built from the catalog), `/api` client, demo |
 | `client/src/lib/csv.ts` | The CSV dialect-detection engine |
 | `client/src/lib/indicators.ts` | Indicator math (pure functions, easy to test) |
 | `client/src/lib/backtest/` | Engine, metrics, strategies, optimizer, custom-code runner |
 | `client/src/lib/workers/` | Web Worker entry point for backtests/optimization |
 | `server/index.mjs`, `server/main.ts` | Zero-dependency Node server (static files + the `/api` routes) |
+| `server/alerts/` | Price alerts: stored list, price watching, `/api/alerts` |
 | `server/providers/` | One REST adapter per data provider (runs on the server) |
 | `shared/` | Wire types and the provider catalog, imported by both server and client |
 | `examples/` | Sample CSVs for the importer |
@@ -79,14 +81,16 @@ export const myAdapter: ProviderAdapter = {
    (which the API turns into a 502 naming the provider). Take the fetch from `ctx` so tests can inject a fake.
    Register the adapter in `server/providers/index.ts`.
 
-2. A catalog entry in `shared/providerCatalog.ts` (id, name, description, timeframes, default symbol and
+2. A catalog entry in `shared/providerCatalog.ts` (id, name, description, timeframes (the native ones; `builtTimeframes` is derived from them, see `shared/timeframes.ts`), default symbol and
    timeframe, popular symbols, `supportsLive`, `hasSymbolList`, `hasSearch`). The client builds its provider
    from it, so the UI picks it up automatically. The catalog holds no host name.
 
-3. Only if the exchange has a public candle websocket: its feed in `server/live/feeds.ts` (URL, interval map,
+3. Only if the exchange has a public candle (or trade) websocket: its feed in `server/live/feeds.ts` (URL, interval map,
    subscribe message, parser, and a `liveFeed()` case), with `supportsLive: true` in the catalog. The browser needs
    no change: it reads every live feed through the server's `/api/live` stream. `supportsLive` must be true
-   exactly when a feed exists (`server/live/feeds.test.ts` checks it).
+   exactly when a feed exists (`server/live/feeds.test.ts` checks it). An exchange with only a trade channel (as
+   Coinbase) builds its candles from trades instead: see `server/live/coinbaseCandles.ts`, which seeds the bar in
+   progress from the REST candle and uses the feed's `onOpen` hook.
 
 Add unit tests for the adapter in `server/providers/` with an injected fake fetch (see `exchanges.test.ts`);
 no test may touch the network.
@@ -120,7 +124,7 @@ Then append it to the `strategies` array. Rules:
 
 - `npm test` must pass; add tests for new pure logic (indicators, CSV parsing, engine behavior, metrics).
 - TypeScript strict mode; no `any` unless there's a good reason (worker boundaries).
-- Keep components small; state lives in `state/store.ts`, not scattered across components.
+- Keep components small; state lives in `state/store.ts` (app-wide) and `state/chart.ts` (per chart; read it with `useChart`), not scattered across components.
 - Prettier-ish formatting: 2-space indent, single quotes, ~120 col width. Match the surrounding code.
 - Comments explain *why*, not *what*.
 
@@ -130,6 +134,7 @@ Then append it to the `strategies` array. Rules:
 2. Conventional commit messages (`feat:`, `fix:`, `docs:`, `refactor:` …) are appreciated.
 3. Make sure `npm run typecheck && npm test && npm run build` pass.
 4. Open a PR describing the change, with a screenshot for UI work (see `docs/e2e-visual-verification.md`).
+5. If the change adds or changes something a user sees or does, update the matching page in `docs/guide/` in the same PR (reuse the screenshots you captured, committed under `docs/evidence/`). `npm test` checks the guide's links, images and index.
 
 ## Reporting bugs
 

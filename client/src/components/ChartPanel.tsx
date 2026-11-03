@@ -1,3 +1,4 @@
+import { DOWN_COLOR, UP_COLOR, chartTheme, theme } from '../lib/theme';
 import {
   CandlestickSeries,
   ColorType,
@@ -9,6 +10,7 @@ import {
   createSeriesMarkers,
   type IChartApi,
   type ISeriesApi,
+  type LogicalRange,
   type ISeriesMarkersPluginApi,
   type LineWidth,
   type MouseEventParams,
@@ -18,12 +20,31 @@ import {
 } from 'lightweight-charts';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { candlesToCsv, downloadDataUrl, downloadFile, sanitizeFileName } from '../lib/export';
-import { fmtCompact, fmtPct, fmtPrice, fmtTime } from '../lib/format';
+import { fmtTime } from '../lib/format';
+import { legendHtml } from '../lib/legend';
+import { ChartContextMenu } from './ChartContextMenu';
+import { ChartRangeBar } from './ChartRangeBar';
 import { fmtTick } from '../lib/time';
-import { computeIndicator, hexToRgba, type ComputedSeries } from '../lib/indicatorCompute';
+import { newPaneState, releasePanes, sizePanes, usePaneLegends, type PaneReg, type PaneState } from './usePaneLegends';
+import { INDICATOR_META, computeIndicator, hexToRgba, type ComputedSeries } from '../lib/indicatorCompute';
 import { getProvider } from '../lib/providers';
 import { useStore } from '../state/store';
+import { canPageOlder, selectDataCandles } from '../state/chart';
 import { usePineSeries } from './usePineSeries';
+import { mergeBarColors, sameBarColors } from '../lib/pine/barColors';
+import { useDrawings } from './chart/useDrawings';
+import { DrawingTextEditor } from './DrawingTextEditor';
+import { DrawingToolbar } from './DrawingToolbar';
+import { DrawingSettingsDialog } from './DrawingSettingsDialog';
+import { IconPicker } from './IconPicker';
+import { isGlyphKind } from '../lib/iconSets/types';
+import { DrawingMenu, DrawingRail, type DrawingControls } from './DrawingRail';
+import { FavoritesBar } from './FavoritesBar';
+import { useMediaQuery } from '../lib/useMediaQuery';
+import { historyNeededFrom, resetLogicalRange, resetRangeKey } from '../lib/quickRange';
+import { HISTORY_PREFETCH_BARS } from '../lib/historyPaging';
+import { useChart, useChartStore } from '../state/chartContext';
+import { barTimeAt, drivesTime, publishCrosshair, publishTimeRange, sameTimeRange, setHovered, subscribe, type TimeRangeSync } from '../lib/layoutSync';
 
 type IndEntry = {
   series: ISeriesApi<'Line'> | ISeriesApi<'Histogram'>;
@@ -31,16 +52,18 @@ type IndEntry = {
 };
 
 const RIGHT_OFFSET = 3;
-const UP = '#22c55e';
-const DOWN = '#ef4444';
+const UP = UP_COLOR;
+const DOWN = DOWN_COLOR;
 
-function toCandleData(c: { time: number; open: number; high: number; low: number; close: number }) {
+function toCandleData(c: { time: number; open: number; high: number; low: number; close: number }, barColors?: Map<number, string>) {
+  const color = barColors?.get(c.time);
   return {
     time: c.time as UTCTimestamp,
     open: c.open,
     high: c.high,
     low: c.low,
     close: c.close,
+    ...(color && { color, wickColor: color, borderColor: color }),
   };
 }
 
@@ -50,19 +73,33 @@ function mapIndicatorPoint(cs: ComputedSeries, point: { time: number; value: num
   return { time, value: point.value };
 }
 
-export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
-  const candles = useStore((s) => s.candles);
-  const dataKey = useStore((s) => s.dataKey);
-  const dataLabel = useStore((s) => s.dataLabel);
-  const indicators = useStore((s) => s.indicators);
-  const btResult = useStore((s) => s.btResult);
-  const showTrades = useStore((s) => s.showTrades);
-  const setShowTrades = useStore((s) => s.setShowTrades);
-  const loadState = useStore((s) => s.loadState);
-  const pineRuns = useStore((s) => s.pineRuns);
-  const providerId = useStore((s) => s.providerId);
-  const setProvider = useStore((s) => s.setProvider);
+export function ChartPanel({
+  onImportCsv,
+  onAddAlert,
+  active = true,
+}: {
+  onImportCsv: () => void;
+  onAddAlert: (level: number) => void;
+  /** Whether this is the chart the top bar acts on: only that chart takes the drawing keyboard shortcuts. */
+  active?: boolean;
+}) {
+  const chartStore = useChartStore();
+  const candles = useChart((s) => s.candles);
+  const dataKey = useChart((s) => s.dataKey);
+  const dataLabel = useChart((s) => s.dataLabel);
+  const indicators = useChart((s) => s.indicators);
+  const btResult = useChart((s) => s.btResult);
+  const showTrades = useChart((s) => s.showTrades);
+  const setShowTrades = useChart((s) => s.setShowTrades);
+  const loadState = useChart((s) => s.loadState);
+  const pineRuns = useChart((s) => s.pineRuns);
+  const providerId = useChart((s) => s.providerId);
+  const setProvider = useChart((s) => s.setProvider);
   const timeZone = useStore((s) => s.timeZone);
+  const timeframe = useChart((s) => s.timeframe);
+  const replayPhase = useChart((s) => s.replay?.phase ?? null);
+  /** During replay: the last visible bar's time, the cut-off for trade markers and Pine output. */
+  const replayCutoff = replayPhase === 'active' ? (candles[candles.length - 1]?.time ?? null) : null;
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const legendRef = useRef<HTMLDivElement | null>(null);
@@ -71,9 +108,14 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const indMapRef = useRef(new Map<string, IndEntry>());
   const lastDataKeyRef = useRef('');
+  const lastLeftEdgeRef = useRef<number | null>(null);
   const lastIndicatorsRef = useRef<unknown>(null);
+  const lastCandlesRef = useRef<typeof candles | null>(null);
+  const savedRangeRef = useRef<{ from: number; to: number } | null>(null);
   const [chartApi, setChartApi] = useState<IChartApi | null>(null);
   const paneEpochRef = useRef(0);
+  const paneStateRef = useRef<PaneState>(newPaneState());
+  const paneLegendsRef = useRef<HTMLDivElement | null>(null);
 
   const precision = useMemo(() => {
     const last = candles[candles.length - 1];
@@ -92,23 +134,23 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
     const chart = createChart(el, {
       autoSize: true,
       layout: {
-        background: { type: ColorType.Solid, color: '#0b0e14' },
-        textColor: '#8b94a7',
+        background: { type: ColorType.Solid, color: chartTheme.background },
+        textColor: chartTheme.text,
         fontSize: 11,
         fontFamily: "Inter, 'Segoe UI', system-ui, sans-serif",
       },
       grid: {
-        vertLines: { color: 'rgba(255,255,255,0.035)' },
-        horzLines: { color: 'rgba(255,255,255,0.035)' },
+        vertLines: { color: chartTheme.grid },
+        horzLines: { color: chartTheme.grid },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: 'rgba(139,148,167,0.45)', labelBackgroundColor: '#2a3348' },
-        horzLine: { color: 'rgba(139,148,167,0.45)', labelBackgroundColor: '#2a3348' },
+        vertLine: { color: chartTheme.crosshair, labelBackgroundColor: chartTheme.crosshairLabel },
+        horzLine: { color: chartTheme.crosshair, labelBackgroundColor: chartTheme.crosshairLabel },
       },
-      rightPriceScale: { borderColor: '#1e2433' },
+      rightPriceScale: { borderColor: chartTheme.scaleBorder },
       timeScale: {
-        borderColor: '#1e2433',
+        borderColor: chartTheme.scaleBorder,
         timeVisible: true,
         secondsVisible: false,
         rightOffset: RIGHT_OFFSET,
@@ -130,6 +172,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
       priceLineStyle: LineStyle.Dotted,
     });
 
+    chart.panes()[0]?.setStretchFactor(1); // the price pane is 1; a new sub pane is DEFAULT_SUB_FACTOR of it
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     markersRef.current = createSeriesMarkers(candleSeries, []);
@@ -159,6 +202,8 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
     const chart = chartApi;
     if (!chart) return;
     paneEpochRef.current++; // panes are dropped below: pine series must be rebuilt
+    // Keep the sizes the user dragged the sub panes to, per indicator id, before removing series empties and drops them.
+    releasePanes(chart, paneStateRef.current, 'all', new Set(indicators.map((i) => i.id)));
 
     for (const { series } of indMapRef.current.values()) {
       try {
@@ -181,16 +226,22 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
     const visible = indicators.filter((i) => i.visible);
     const subCount = visible.filter((s) => s.kind === 'rsi' || s.kind === 'macd').length;
     for (let i = 0; i < subCount; i++) chart.addPane();
+    sizePanes(
+      chart,
+      paneStateRef.current,
+      visible.filter((s) => s.kind === 'rsi' || s.kind === 'macd').map((s, i) => ({ id: s.id, paneIndex: 1 + i })),
+    );
 
     let subIdx = 0;
     for (const spec of visible) {
-      const computed = computeIndicator(spec, useStore.getState().candles);
+      const computed = computeIndicator(spec, chartStore.getState().candles);
       if (computed.length === 0) continue;
       let paneIndex = 0;
       if (computed[0].pane === 'sub') {
         paneIndex = 1 + subIdx;
         subIdx++;
       }
+      const legendEntries: PaneReg['entries'] = [];
       for (const cs of computed) {
         const common = {
           priceLineVisible: false,
@@ -215,6 +266,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
             chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
           }
           indMapRef.current.set(`${spec.id}|${cs.key}`, { series, kind: 'histogram' });
+          if (cs.pane === 'sub') legendEntries.push({ title: cs.title, color: cs.color, series });
         } else {
           const series = chart.addSeries(
             LineSeries,
@@ -227,17 +279,51 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
               color: pl.color,
               lineWidth: 1,
               lineStyle: LineStyle.Dashed,
-              axisLabelVisible: false,
+              axisLabelVisible: true,
               title: '',
             });
           }
           indMapRef.current.set(`${spec.id}|${cs.key}`, { series, kind: 'line' });
+          if (cs.pane === 'sub') legendEntries.push({ title: cs.title, color: cs.color, series });
         }
+      }
+      if (paneIndex > 0 && legendEntries.length > 0) {
+        paneStateRef.current.panes.set(spec.id, {
+          id: spec.id,
+          source: 'builtin',
+          paneIndex,
+          name: INDICATOR_META[spec.kind].name,
+          params: INDICATOR_META[spec.kind].params.map((p) => String(spec.params[p.key])),
+          // One plot: the name already says what it is.
+          entries: legendEntries.length === 1 ? [{ ...legendEntries[0], title: '' }] : legendEntries,
+        });
       }
     }
   }, [chartApi, indicators]);
 
-  usePineSeries(chartApi, indicators, pineRuns, paneEpochRef);
+  usePineSeries(chartApi, indicators, pineRuns, paneEpochRef, replayCutoff, paneStateRef);
+  /* barcolor() of the visible Pine scripts: kept as the same map while its content is unchanged. */
+  const mergedBarColors = useMemo(() => mergeBarColors(indicators, pineRuns, replayCutoff), [indicators, pineRuns, replayCutoff]);
+  const barColorsRef = useRef(mergedBarColors);
+  if (!sameBarColors(barColorsRef.current, mergedBarColors)) barColorsRef.current = mergedBarColors;
+  const barColors = barColorsRef.current;
+  /** The colors the candle series was last sent. */
+  const sentBarColorsRef = useRef<Map<number, string>>(barColors);
+  const narrow = useMediaQuery('(max-width: 600px)');
+  /* The crosshair lines follow the cursor kind (the price and time labels stay in every kind). */
+  const cursorKind = useStore((s) => s.cursorKind);
+  useEffect(() => {
+    const lines = cursorKind === 'cross';
+    chartApi?.applyOptions({ crosshair: { vertLine: { visible: lines }, horzLine: { visible: lines } } });
+  }, [chartApi, cursorKind]);
+  const drawings = useDrawings(chartApi, chartApi ? candleSeriesRef.current : null, containerRef, active);
+
+  /* Entering replay: remember the view before the data effect cuts the bars. Exit restores it (below). */
+  useEffect(() => {
+    if (replayPhase !== 'active' || !chartApi) return;
+    const r = chartApi.timeScale().getVisibleLogicalRange();
+    savedRangeRef.current = r ? { from: r.from, to: r.to } : null;
+  }, [chartApi, replayPhase === 'active']);
 
   /* ---------------- push data (full or incremental) ---------------- */
   useEffect(() => {
@@ -248,15 +334,35 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
     const dataChanged = lastDataKeyRef.current !== dataKey;
     const indChanged = lastIndicatorsRef.current !== indicators;
 
+    // One bar appended or the last bar changed: send just that bar. Any other change to the same data
+    // (replay entering, stepping back, exiting, a merged backfill) replaces the bars without refitting.
+    const prev = lastCandlesRef.current;
+    const incremental =
+      !dataChanged &&
+      prev != null &&
+      prev.length > 0 &&
+      candles.length - prev.length >= 0 &&
+      candles.length - prev.length <= 1 &&
+      candles[prev.length - 1].time === prev[prev.length - 1].time;
+    lastCandlesRef.current = candles;
+
+    // Older bars merged in at the start (a history page): the series is replaced and lightweight-charts keeps the view
+    // anchored to the last bar, so the visible time window stays; the left edge may still be near the first bar.
+    const prepended = !dataChanged && !incremental && prev != null && prev.length > 0 && candles[0].time < prev[0].time;
+
     if (dataChanged) {
-      candleSeries.setData(candles.map(toCandleData));
+      candleSeries.setData(candles.map((c) => toCandleData(c, barColors)));
       lastDataKeyRef.current = dataKey;
+      lastLeftEdgeRef.current = null; // the fit below is not a scroll back: do not page for it
       chart.timeScale().fitContent();
+    } else if (incremental && sentBarColorsRef.current === barColors) {
+      candleSeries.update(toCandleData(candles[candles.length - 1], barColors));
     } else {
-      candleSeries.update(toCandleData(candles[candles.length - 1]));
+      // Also when only the bar colors changed since the last send: the update path would recolor one bar.
+      candleSeries.setData(candles.map((c) => toCandleData(c, barColors)));
     }
 
-    if (dataChanged || indChanged) {
+    if (dataChanged || indChanged || !incremental) {
       for (const spec of indicators) {
         if (!spec.visible) continue;
         for (const cs of computeIndicator(spec, candles)) {
@@ -281,9 +387,79 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
       }
     }
 
+    if (prepended) {
+      const r = chart.timeScale().getVisibleLogicalRange();
+      lastLeftEdgeRef.current = r ? r.from : null;
+      if (r && r.from < HISTORY_PREFETCH_BARS) void chartStore.getState().loadOlder(); // still near the left edge: the next page
+    }
+
+    sentBarColorsRef.current = barColors;
     updateLegend(candles[candles.length - 1]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chartApi, candles, dataKey, indicators]);
+
+  /* A backtest or optimizer run that loaded older history asks the chart to show its range (once). */
+  const viewRequest = useChart((s) => s.viewRequest);
+  useEffect(() => {
+    if (!chartApi || !viewRequest) return;
+    // One frame later: a range set in the same frame as the merged bars is overridden by the chart's own update for them.
+    const frame = requestAnimationFrame(() => {
+      try {
+        chartApi.timeScale().setVisibleRange({ from: viewRequest.from as UTCTimestamp, to: viewRequest.to as UTCTimestamp });
+      } catch {
+        /* no data to place the range on */
+      }
+      chartStore.getState().clearViewRequest();
+    });
+    return () => cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartApi, viewRequest]);
+
+  /* Only the bar colors changed (new run, script hidden or removed, replay cutoff): re-send the bars, keep the view. */
+  useEffect(() => {
+    const candleSeries = candleSeriesRef.current;
+    if (!chartApi || !candleSeries || candles.length === 0) return;
+    if (sentBarColorsRef.current === barColors) return;
+    sentBarColorsRef.current = barColors;
+    candleSeries.setData(candles.map((c) => toCandleData(c, barColors)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartApi, barColors]);
+
+  /* Scrolling or zooming back to within a page's reach of the first loaded bar asks for the next older page. */
+  useEffect(() => {
+    if (!chartApi) return;
+    const ts = chartApi.timeScale();
+    const onRange = (r: LogicalRange | null) => {
+      if (!r) return;
+      const prevFrom = lastLeftEdgeRef.current;
+      lastLeftEdgeRef.current = r.from;
+      // Only a move of the left edge toward older bars counts: a prepend shifts it right, a fresh fit is the first sample.
+      if (prevFrom != null && r.from < prevFrom && r.from < HISTORY_PREFETCH_BARS) void chartStore.getState().loadOlder();
+    };
+    ts.subscribeVisibleLogicalRangeChange(onRange);
+    return () => ts.unsubscribeVisibleLogicalRangeChange(onRange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartApi]);
+
+  /* Leaving replay: put the view back as it was (no refetch, no fitContent). */
+  useEffect(() => {
+    if (replayPhase === 'active' || !chartApi) return;
+    const saved = savedRangeRef.current;
+    savedRangeRef.current = null;
+    if (saved) chartApi.timeScale().setVisibleLogicalRange(saved);
+  }, [chartApi, replayPhase]);
+
+  /* Picking a replay start: the next click on a bar starts the replay there. */
+  useEffect(() => {
+    const chart = chartApi;
+    if (!chart || replayPhase !== 'picking') return;
+    const onClick = (param: MouseEventParams<Time>) => {
+      if (param.time == null) return;
+      chartStore.getState().startReplayAt(param.time as number);
+    };
+    chart.subscribeClick(onClick);
+    return () => chart.unsubscribeClick(onClick);
+  }, [chartApi, replayPhase]);
 
   /* ---------------- legend (imperative, rAF-throttled) ---------------- */
   const legendRaf = useRef(0);
@@ -292,15 +468,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
     if (!el || !c) return;
     cancelAnimationFrame(legendRaf.current);
     legendRaf.current = requestAnimationFrame(() => {
-      const chg = c.open !== 0 ? ((c.close - c.open) / c.open) * 100 : 0;
-      const cls = chg >= 0 ? 'pos' : 'neg';
-      el.innerHTML =
-        `<div class="legend-title">${escapeHtml(dataLabel)}</div>` +
-        `<div class="legend-ohlc">` +
-        `O <b>${fmtPrice(c.open)}</b> H <b>${fmtPrice(c.high)}</b> L <b>${fmtPrice(c.low)}</b> C <b>${fmtPrice(c.close)}</b> ` +
-        `<span class="${cls}">${fmtPct(chg)}</span> V <b>${fmtCompact(c.volume)}</b> ` +
-        `<span class="muted-2">${fmtTime(c.time, { timeZone: useStore.getState().timeZone })}</span>` +
-        `</div>`;
+      el.innerHTML = legendHtml(c, dataLabel, useStore.getState().timeZone);
     });
   }
 
@@ -312,7 +480,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
       const data = param.seriesData.get(candleSeries) as
         | { open: number; high: number; low: number; close: number }
         | undefined;
-      const state = useStore.getState();
+      const state = chartStore.getState();
       const last = state.candles[state.candles.length - 1];
       if (!data || !param.time) {
         if (last) updateLegend(last);
@@ -327,6 +495,91 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chartApi, dataLabel]);
 
+  /* ---------------- sync in layout: crosshair and visible time range ---------------- */
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  useEffect(() => {
+    const chart = chartApi;
+    const candleSeries = candleSeriesRef.current;
+    const el = containerRef.current;
+    if (!chart || !candleSeries || !el) return;
+    const id = chartStore.getState().id;
+    let publishingCrosshair = false;
+    let applyingCrosshair = false;
+    let lastApplied: TimeRangeSync | null = null;
+    let lastSent: TimeRangeSync | null = null;
+    const visible = () => el.clientWidth > 0 && el.clientHeight > 0; // a hidden (narrow-screen) chart skips applying
+
+    const onMove = (param: MouseEventParams<Time>) => {
+      if (applyingCrosshair || !useStore.getState().sync.crosshair) return;
+      if (param.point && param.time != null) {
+        if (!param.sourceEvent) return; // a programmatic move (a sync landing here), not the person
+        const price = candleSeries.coordinateToPrice(param.point.y);
+        if (price == null) return;
+        const s = chartStore.getState();
+        publishingCrosshair = true;
+        publishCrosshair(id, { time: param.time as number, price, providerId: s.providerId, symbol: s.symbol });
+      } else if (publishingCrosshair) {
+        publishingCrosshair = false;
+        publishCrosshair(id, null);
+      }
+    };
+    chart.subscribeCrosshairMove(onMove);
+
+    const onRange = (range: { from: Time; to: Time } | null) => {
+      if (!range || !useStore.getState().sync.time) return;
+      const r = { from: range.from as number, to: range.to as number };
+      if (sameTimeRange(r, lastApplied) || sameTimeRange(r, lastSent)) return;
+      if (!drivesTime(id, activeRef.current)) return;
+      lastSent = r;
+      publishTimeRange(id, r);
+    };
+    chart.timeScale().subscribeVisibleTimeRangeChange(onRange);
+
+    const onEnter = () => setHovered(id, true);
+    const onLeave = () => setHovered(id, false);
+    el.addEventListener('pointerenter', onEnter);
+    el.addEventListener('pointerleave', onLeave);
+
+    const off = subscribe(id, {
+      crosshair(pos) {
+        if (!useStore.getState().sync.crosshair || !visible()) return;
+        applyingCrosshair = true;
+        try {
+          const s = chartStore.getState();
+          const t = pos ? barTimeAt(s.candles, pos.time) : null;
+          if (!pos || t == null) {
+            chart.clearCrosshairPosition();
+            return;
+          }
+          const bar = s.candles.find((c) => c.time === t);
+          const same = pos.providerId === s.providerId && pos.symbol === s.symbol;
+          chart.setCrosshairPosition(same ? pos.price : (bar?.close ?? pos.price), t as UTCTimestamp, candleSeries);
+        } finally {
+          applyingCrosshair = false;
+        }
+      },
+      timeRange(range) {
+        if (!useStore.getState().sync.time || !visible() || sameTimeRange(range, lastApplied)) return;
+        lastApplied = range;
+        try {
+          chart.timeScale().setVisibleRange({ from: range.from as UTCTimestamp, to: range.to as UTCTimestamp });
+        } catch {
+          /* no data to place the range on yet */
+        }
+      },
+    });
+    return () => {
+      off();
+      setHovered(id, false);
+      el.removeEventListener('pointerenter', onEnter);
+      el.removeEventListener('pointerleave', onLeave);
+      chart.unsubscribeCrosshairMove(onMove);
+      chart.timeScale().unsubscribeVisibleTimeRangeChange(onRange);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartApi]);
+
   /* Zone change: swap the formatters in place (no rebuild, visible range untouched) and redraw the legend. */
   useEffect(() => {
     const chart = chartApi;
@@ -335,7 +588,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
       localization: { timeFormatter: (t: Time) => fmtTime(t as number, { timeZone }) },
       timeScale: { tickMarkFormatter: (t: Time, type: number) => fmtTick(t as number, type, timeZone) },
     });
-    const last = useStore.getState().candles.at(-1);
+    const last = chartStore.getState().candles.at(-1);
     if (last) updateLegend(last);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chartApi, timeZone]);
@@ -350,6 +603,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
     }
     const markers: SeriesMarker<Time>[] = [];
     for (const t of btResult.trades) {
+      if (replayCutoff != null && t.entryTime > replayCutoff) continue; // not yet happened at the replay point
       markers.push({
         time: t.entryTime as UTCTimestamp,
         position: t.side === 'long' ? 'belowBar' : 'aboveBar',
@@ -358,22 +612,24 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
         text: t.side === 'long' ? 'L' : 'S',
         size: 1,
       });
+      if (replayCutoff != null && t.exitTime > replayCutoff) continue;
       markers.push({
         time: t.exitTime as UTCTimestamp,
         position: t.side === 'long' ? 'aboveBar' : 'belowBar',
-        color: hexToRgba('#8b94a7', 0.9),
+        color: hexToRgba(theme.muted, 0.9),
         shape: 'circle',
         size: 0.6,
       });
     }
     markers.sort((a, b) => (a.time as number) - (b.time as number));
     plugin.setMarkers(markers);
-  }, [btResult, showTrades, chartApi]);
+  }, [btResult, showTrades, chartApi, replayCutoff]);
 
   const provider = getProvider(providerId);
 
-  // Restore the fresh-load view: auto-scale every pane's price scales, default right offset, fit all data.
-  function resetView() {
+  // Restore the fresh-load view: auto-scale every pane's price scales, default right offset, then show the window for the
+  // timeframe (minutes: last day, hours: 5 days, days: a month), or all data for weeks, months or when the bars do not reach back.
+  async function resetView() {
     if (!chartApi) return;
     const panes = chartApi.panes();
     for (let i = 0; i < panes.length; i++) {
@@ -386,14 +642,73 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
       }
     }
     chartApi.timeScale().applyOptions({ rightOffset: RIGHT_OFFSET });
-    chartApi.timeScale().fitContent();
+    // Page in older bars until the timeframe's window is covered (or the history start stops it).
+    const st = chartStore.getState();
+    const need = canPageOlder(st, useStore.getState().historyLoading) ? historyNeededFrom(resetRangeKey(timeframe), st.candles, timeZone) : null;
+    if (need != null) await st.loadHistoryTo(need);
+    const range = resetLogicalRange(timeframe, chartStore.getState().candles, timeZone, RIGHT_OFFSET);
+    if (range) chartApi.timeScale().setVisibleLogicalRange(range);
+    else chartApi.timeScale().fitContent();
   }
+
+  const favorites = useStore((s) => s.drawingFavorites);
+  const lastTool = useStore((s) => s.drawingLastTool);
+  const toggleFavorite = useStore((s) => s.toggleDrawingFavorite);
+  const drawingControls: DrawingControls = {
+    tool: drawings.tool,
+    cursorKind: drawings.cursorKind,
+    onPick: drawings.pickEntry,
+    favorites,
+    onToggleFavorite: toggleFavorite,
+    lastTool,
+    disabled: !drawings.hasData,
+    imagesOff: !drawings.imagesAvailable,
+    magnet: drawings.magnet,
+    onMagnet: drawings.toggleMagnet,
+    magnetStrength: drawings.magnetStrength,
+    onMagnetMode: drawings.setMagnetMode,
+    locked: drawings.lockAll,
+    onLocked: drawings.toggleLockAll,
+    stayMode: drawings.stayMode,
+    onStayMode: drawings.toggleStayMode,
+    hidden: drawings.hidden,
+    onHidden: drawings.toggleHidden,
+    canDeleteAll: drawings.drawingCount > 0,
+    onDeleteAll: drawings.deleteAll,
+  };
+
+  usePaneLegends(chartApi, paneStateRef, paneLegendsRef, [indicators, pineRuns, candles, replayCutoff]);
 
   return (
     <div className="chart-wrap">
+      <DrawingRail {...drawingControls} />
+      <div className="chart-main">
       <div className="chart-legend" ref={legendRef} />
-      <div className="chart-container" ref={containerRef} />
+      <div className="pane-legends" ref={paneLegendsRef} />
+      <div className={`chart-container${replayPhase === 'picking' ? ' picking' : ''}`} ref={containerRef} />
+      {drawings.editor && (
+        <DrawingTextEditor
+          key={drawings.editor.key}
+          left={drawings.editor.left}
+          top={drawings.editor.top}
+          initialText={drawings.editor.text}
+          style={drawings.editor.style}
+          onCommit={drawings.editor.onCommit}
+          onCancel={drawings.editor.onCancel}
+          width={drawings.editor.width}
+          onTab={drawings.editor.onTab}
+        />
+      )}
+      {drawings.toolbar && !drawings.settings && !drawings.editor && (
+        <DrawingToolbar model={drawings.toolbar} actions={drawings.actions} onStyle={drawings.setStyleField} />
+      )}
+      {drawings.picker && isGlyphKind(drawings.picker) && <IconPicker key={drawings.picker} kind={drawings.picker} onPick={drawings.choosePick} onClose={drawings.closePicker} />}
+      {drawings.settings && <DrawingSettingsDialog key={drawings.settings.drawing.id} model={drawings.settings} />}
+      {active && favorites.length > 0 && <FavoritesBar {...drawingControls} />}
+      <ChartRangeBar chartApi={chartApi} />
+      <ChartContextMenu containerRef={containerRef} seriesRef={candleSeriesRef} precision={precision} enabled={candles.length > 0} onAddAlert={onAddAlert} drawings={drawings.actions} />
       <div className="chart-toolbar">
+        {narrow && <DrawingMenu {...drawingControls} />}
         <button
           className="ghost icon"
           title="Reset view"
@@ -417,7 +732,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
           className="ghost icon"
           title="Export candles as CSV"
           disabled={candles.length === 0}
-          onClick={() => downloadFile(`vost_${sanitizeFileName(dataLabel || 'candles')}.csv`, candlesToCsv(candles, { isoDates: false }))}
+          onClick={() => downloadFile(`vost_${sanitizeFileName(dataLabel || 'candles')}.csv`, candlesToCsv(selectDataCandles(chartStore.getState()), { isoDates: false }))}
         >
           ⬇
         </button>
@@ -442,21 +757,21 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
             <div className="empty-card">
               <h2>No data on the chart yet</h2>
               <p>
-                Pull free public data from <b>Binance</b>, <b>Coinbase</b>, <b>Kraken</b>, <b>Bybit</b>, <b>OKX</b>, <b>Yahoo Finance</b> or <b>Stooq</b> using the toolbar above — or work{' '}
+                Pull free public data from <b>Binance</b>, <b>Coinbase</b>, <b>Kraken</b>, <b>Bybit</b>, <b>OKX</b>, or <b>Yahoo Finance</b> using the toolbar above — or work{' '}
                 <b>completely offline</b> by importing an OHLCV CSV file.
               </p>
               <p className="muted-2">
                 {provider.offline ? 'This provider generates deterministic synthetic candles locally.' : provider.description}
               </p>
               <div className="empty-actions">
-                <button className="primary" onClick={() => void useStore.getState().loadData()}>
+                <button className="primary" onClick={() => void chartStore.getState().loadData()}>
                   Load {provider.name} data
                 </button>
                 <button onClick={onImportCsv}>Import CSV</button>
                 <button
                   onClick={() => {
                     if (providerId !== 'demo') setProvider('demo');
-                    else void useStore.getState().loadData();
+                    else void chartStore.getState().loadData();
                   }}
                 >
                   Try demo data
@@ -466,10 +781,7 @@ export function ChartPanel({ onImportCsv }: { onImportCsv: () => void }) {
           )}
         </div>
       )}
+      </div>
     </div>
   );
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch] as string);
 }

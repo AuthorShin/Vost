@@ -13,6 +13,19 @@
  *   HOST  (default 0.0.0.0)
  *   VOST_STATUS_INTERVAL  seconds between background health checks of the
  *                         exchanges (default 60; 0 turns them off)
+ *   VOST_DATA_DIR  folder for the files the server writes, alerts.json and
+ *                  pine-libraries.json (default <repo>/data; /data in the Docker image)
+ *   VOST_ALERT_POLL  seconds between price polls for alerts on providers
+ *                    without a live feed (default 60; minimum 10)
+ *   VOST_TELEGRAM_BOT_TOKEN, VOST_TELEGRAM_CHAT_ID  both set: every alert that
+ *                       fires is also sent to that Telegram chat (the token is a secret)
+ *   VOST_RECORD  the markets the server records at all times (history filled
+ *                from the exchange, then every closed candle written to the
+ *                candle store): entries separated by commas or spaces, each
+ *                provider:SYMBOL or provider:SYMBOL:tf/tf. Default: BTC and ETH
+ *                on Binance, Coinbase and Hyperliquid, every timeframe. `off`
+ *                records nothing. Keeps one exchange connection open per series.
+ *   VOST_RECORD_BARS  bars kept per recorded series (default 20000; minimum 100)
  *   VOST_TEST_UPSTREAM  test only: http://127.0.0.1:<port> of a fake market-data
  *                       service that every outbound call is rewritten to (see
  *                       docs/e2e-visual-verification.md). Refused when
@@ -23,9 +36,17 @@ import { createReadStream } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { createApiDeps, handleApi } from './api.ts';
+import { createAlerts, isAlertsPath } from './alerts/index.ts';
+import { createTelegram, readTelegramConfig } from './alerts/telegram.ts';
+import { createApiDeps, handleApi, providerHistory } from './api.ts';
+import { createLibraries } from './pine/libraries.ts';
+import { handlePineLibraries, isPineLibrariesPath } from './pine/route.ts';
 import { createRelay } from './live/relay.ts';
 import { handleLive } from './live/route.ts';
+import { describeRecord, readRecordConfig, recordedFilter } from './candles/recordConfig.ts';
+import { createRecorder } from './candles/recorder.ts';
+import { adapters } from './providers/index.ts';
+import { openCandleStore } from './candles/store.ts';
 import { sendJson } from './respond.ts';
 import { handleStatus } from './status/route.ts';
 import { createStatusService } from './status/scheduler.ts';
@@ -109,10 +130,10 @@ async function handleStatic(req: http.IncomingMessage, res: http.ServerResponse,
     } catch {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       res.end(
-        `<!doctype html><html><body style="background:#0b0e14;color:#e6ebf5;font-family:system-ui;padding:40px;max-width:640px;margin:auto">
+        `<!doctype html><html><body style="background:#09090b;color:#e8e8ed;font-family:system-ui;padding:40px;max-width:640px;margin:auto">
         <h1>Vost is running — but the client is not built yet</h1>
         <p>The market-data API is live at <code>/api/providers</code>. To build the web app:</p>
-        <pre style="background:#11151f;padding:14px;border-radius:8px">npm install
+        <pre style="background:#111114;padding:14px;border-radius:8px">npm install
 npm run build
 npm start</pre>
         <p>…or, for development with hot reload: <code>npm run dev</code></p>
@@ -157,17 +178,51 @@ npm start</pre>
 
 /* --------------------------------- server -------------------------------- */
 
-const relay = createRelay();
+const relay = createRelay({ history: (p, req) => providerHistory(apiDeps, p, req) });
 const intervalEnv = Number(process.env.VOST_STATUS_INTERVAL ?? 60);
 const status = createStatusService({
   version,
   intervalSeconds: Number.isFinite(intervalEnv) && intervalEnv > 0 ? intervalEnv : 0,
   relayStats: () => relay.stats(),
+  candleStats: () => candles.stats(),
+  recorderStats: () => recorder.stats(),
 });
-const apiDeps = createApiDeps({ onOutcome: (provider, feed, result) => status.registry.record(provider, feed, result, 'traffic') });
+const DATA_DIR = path.resolve(process.env.VOST_DATA_DIR || path.join(ROOT, 'data'));
+const candles = await openCandleStore({ dir: DATA_DIR });
+const recordConfig = readRecordConfig(process.env, (line) => console.warn(line));
+const apiDeps = createApiDeps({ candles, isRecorded: recordedFilter(recordConfig), onOutcome: (provider, feed, result) => status.registry.record(provider, feed, result, 'traffic') });
+
+const recorder = createRecorder({
+  config: recordConfig,
+  store: candles,
+  relay,
+  adapters,
+  ctx: () => ({ fetch: apiDeps.fetch, symbols: apiDeps.symbols }),
+});
+
+const pollEnv = Number(process.env.VOST_ALERT_POLL ?? 60);
+const telegramConfig = readTelegramConfig(process.env, (line) => console.warn(line));
+const telegram = createTelegram({ config: telegramConfig, fetch: apiDeps.fetch, log: (line) => console.log(line) });
+console.log(telegramConfig ? `[alerts] telegram on (chat ${telegramConfig.chatId})` : '[alerts] telegram off');
+const alerts = await createAlerts({
+  dataDir: DATA_DIR,
+  telegram,
+  pollSeconds: Number.isFinite(pollEnv) ? pollEnv : 60,
+  relay,
+  ctx: () => ({ fetch: apiDeps.fetch, symbols: apiDeps.symbols }),
+});
+
+const pineLibraries = createLibraries({ dir: DATA_DIR, fetch: apiDeps.fetch, log: (line) => console.log(line) });
+await pineLibraries.load();
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+
+  // Alerts are same-origin only: no CORS grant, not even on the preflight.
+  if (isAlertsPath(url.pathname)) return void alerts.handle(req, res, url);
+
+  // Pine libraries: reads get the usual CORS grant, writes are same-origin only.
+  if (isPineLibrariesPath(url.pathname)) return void handlePineLibraries(req, res, url, pineLibraries, (line) => console.log(line));
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -211,14 +266,22 @@ server.listen(PORT, HOST, () => {
   console.log(`  → http://localhost:${PORT}`);
   console.log(`  → market data: /api/providers, /api/history, /api/symbols, /api/search, /api/status`);
   console.log(`  → live candles: /api/live`);
+  console.log(`  → price alerts: /api/alerts (stored in ${DATA_DIR}; Telegram ${telegram.configured ? 'on' : 'off'})`);
+  console.log(`  → pine libraries: /api/pine/libraries (${pineLibraries.count} stored in ${DATA_DIR})`);
+  console.log(`  → candle store: ${`${candles.on ? 'on' : 'off'} (${candles.file})`}`);
+  console.log(`  → ${describeRecord(recordConfig, candles.on)}`);
   console.log('');
   status.scheduler.start();
+  recorder.start();
 });
 
 const shutdown = (): void => {
   status.scheduler.stop();
+  const saved = alerts.stop(); // drops its feeds, ends its streams, writes held prices
+  recorder.stop(); // unsubscribes its feeds and aborts its fill, before the relay and the store go
   relay.closeAll(); // ends the streams, so server.close does not wait on them
-  server.close(() => process.exit(0));
+  candles.close();
+  server.close(() => void saved.finally(() => process.exit(0)));
   setTimeout(() => process.exit(0), 2000).unref();
 };
 process.on('SIGINT', shutdown);

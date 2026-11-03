@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Candle } from '../../shared/market.ts';
 import { PROVIDER_CATALOG } from '../../shared/providerCatalog.ts';
@@ -6,7 +9,9 @@ import { openUpstream, type UpstreamSocket } from '../../server/live/socket.ts';
 import { adapters } from '../../server/providers/index.ts';
 import { createSymbolCache } from '../../server/providers/symbolCache.ts';
 import { setTestUpstream } from '../../server/testUpstream.ts';
+import { createLibraries } from '../../server/pine/libraries.ts';
 import { startFakeUpstream, type FakeUpstream } from './index.ts';
+import { CLOSED_LIB_PATH, NESTED_LIB_PATH, NESTED_LIB_SOURCE, OPEN_LIB_PATH, OPEN_LIB_SOURCE } from './pine-libraries.ts';
 
 let fake: FakeUpstream;
 
@@ -26,8 +31,9 @@ const HOSTS: Record<string, string[]> = {
   kraken: ['api.kraken.com'],
   bybit: ['api.bybit.com'],
   okx: ['www.okx.com'],
+  'hyperliquid-perps': ['api.hyperliquid.xyz'],
+  'hyperliquid-spot': ['api.hyperliquid.xyz'],
   yahoo: ['query1.finance.yahoo.com'],
-  stooq: ['stooq.com'],
 };
 
 describe('fake upstream REST, through the real adapters and the real fetch', () => {
@@ -78,7 +84,8 @@ describe('fake upstream REST, through the real adapters and the real fetch', () 
 
 /** Collects what an upstream socket reports and lets a test wait for the next matching event. */
 function watch(provider: string, host?: 'fallback') {
-  const found = liveFeed(provider, provider === 'okx' ? 'BTC-USDT' : provider === 'kraken' ? 'XBTUSD' : 'BTCUSDT', '1m');
+  const symbols: Record<string, string> = { coinbase: 'BTC-USD', okx: 'BTC-USDT', kraken: 'XBTUSD', 'hyperliquid-perps': 'BTC', 'hyperliquid-spot': 'HYPE/USDC' };
+  const found = liveFeed(provider, symbols[provider] ?? 'BTCUSDT', '1m');
   if ('error' in found) throw new Error(found.error);
   const feed = host === 'fallback' ? { ...found.feed, url: found.feed.fallbackUrl! } : found.feed;
   const klines: Candle[] = [];
@@ -123,7 +130,7 @@ function watch(provider: string, host?: 'fallback') {
 }
 
 describe('fake upstream live feeds, through the real socket and WebSocket', () => {
-  for (const provider of ['binance', 'kraken', 'bybit', 'okx']) {
+  for (const provider of ['binance', 'coinbase', 'kraken', 'bybit', 'okx', 'hyperliquid-perps', 'hyperliquid-spot']) {
     it(`${provider}: a kline arrives, then a new one with a different close`, async () => {
       const w = watch(provider);
       try {
@@ -160,6 +167,8 @@ describe('fake upstream live feeds, through the real socket and WebSocket', () =
     expect(hosts).toContain('ws.kraken.com');
     expect(hosts).toContain('stream.bybit.com');
     expect(hosts).toContain('ws.okx.com:8443');
+    expect(hosts).toContain('ws-feed.exchange.coinbase.com');
+    expect(hosts).toContain('api.hyperliquid.xyz');
   });
 
   it('stop() makes the socket report a failure and start() brings the klines back', async () => {
@@ -176,5 +185,41 @@ describe('fake upstream live feeds, through the real socket and WebSocket', () =
     } finally {
       w.socket.close();
     }
+  });
+
+  it('answers a Telegram sendMessage POST and records its method and body', async () => {
+    const before = fake.requests.length;
+    const body = JSON.stringify({ chat_id: '1', text: 'hello' });
+    const res = await fetch(`${fake.url}/https/api.telegram.org/bottest-token/sendMessage`, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+    expect(res.status).toBe(200);
+    const reply = (await res.json()) as { ok: boolean; result: { message_id: number } };
+    expect(reply.ok).toBe(true);
+    expect(typeof reply.result.message_id).toBe('number');
+    expect(fake.requests.slice(before)).toEqual([{ kind: 'http', scheme: 'https', host: 'api.telegram.org', path: '/bottest-token/sendMessage', method: 'POST', body }]);
+    const other = await fetch(`${fake.url}/https/api.telegram.org/bottest-token/getMe`, { method: 'POST', body: '{}' });
+    expect(other.status).toBe(404);
+  });
+});
+
+describe('fake upstream TradingView library endpoints, through the real Libraries lookup', () => {
+  it('serves an open-source library, the library it imports, and a closed-source one', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'vost-fake-tv-'));
+    try {
+      const libs = createLibraries({ dir, log: () => undefined });
+      await libs.load();
+      expect(await libs.get(OPEN_LIB_PATH)).toMatchObject({ ok: true, origin: 'tradingview', source: OPEN_LIB_SOURCE });
+      expect(await libs.get(NESTED_LIB_PATH)).toMatchObject({ ok: true, source: NESTED_LIB_SOURCE });
+      expect(await libs.get(CLOSED_LIB_PATH)).toMatchObject({ ok: false, reason: 'closed-source' });
+      expect(await libs.get('alice/Unknown/1')).toMatchObject({ ok: false, reason: 'not-found' });
+      const hosts = new Set(fake.requests.map((r) => r.host));
+      expect(hosts.has('www.tradingview.com') && hosts.has('pine-facade.tradingview.com')).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('search without type=3 finds no library', async () => {
+    const res = await fetch(`${fake.url}/https/www.tradingview.com/pubscripts-suggest-json/?search=OpenLib`);
+    expect(((await res.json()) as { results: unknown[] }).results).toEqual([]);
   });
 });

@@ -1,11 +1,13 @@
+import { editorTheme } from '../lib/theme';
 import { useEffect, useRef } from 'react';
-import { Compartment, EditorState } from '@codemirror/state';
+import { ChangeSet, Compartment, EditorState, type Extension } from '@codemirror/state';
 import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from '@codemirror/view';
 import { bracketMatching, HighlightStyle, indentOnInput, syntaxHighlighting } from '@codemirror/language';
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from '@codemirror/autocomplete';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { lintGutter, setDiagnostics } from '@codemirror/lint';
 import { tags as t } from '@lezer/highlight';
+import { compareExtension, originalChange, type MergeLib } from '../lib/pine/compareView';
 import { errorToDiagnostic, pineCompletions, pineLanguage, type PineEditorError } from '../lib/pine/language';
 
 const highlight = HighlightStyle.define([
@@ -22,18 +24,34 @@ const highlight = HighlightStyle.define([
 
 const theme = EditorView.theme(
   {
-    '&': { backgroundColor: '#0c0f17', border: '1px solid var(--border-2)', borderRadius: 'var(--radius-sm)', fontSize: '12.5px' },
+    '&': { backgroundColor: editorTheme.background, border: '1px solid var(--border-2)', borderRadius: 'var(--radius-sm)', fontSize: '12.5px' },
     '&.cm-focused': { outline: '1px solid var(--border-2)' },
     '.cm-scroller': { fontFamily: 'var(--mono)', lineHeight: '1.55' },
-    '.cm-content': { caretColor: '#e6e8ef' },
-    '.cm-cursor': { borderLeftColor: '#e6e8ef' },
-    '.cm-gutters': { backgroundColor: '#0c0f17', color: '#5c6784', border: 'none' },
+    '.cm-content': { caretColor: editorTheme.text },
+    '.cm-cursor': { borderLeftColor: editorTheme.text },
+    '.cm-gutters': { backgroundColor: editorTheme.background, color: editorTheme.gutterText, border: 'none' },
     '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.03)' },
     '.cm-activeLineGutter': { backgroundColor: 'rgba(255,255,255,0.03)' },
     '&.cm-focused .cm-selectionBackground, .cm-selectionBackground': { backgroundColor: 'rgba(100,140,255,0.3)' },
-    '.cm-tooltip': { backgroundColor: '#161b27', border: '1px solid var(--border-2)', color: '#e6e8ef' },
-    '.cm-tooltip-autocomplete ul li[aria-selected]': { backgroundColor: 'rgba(100,140,255,0.3)', color: '#e6e8ef' },
+    '.cm-tooltip': { backgroundColor: editorTheme.tooltip, border: '1px solid var(--border-2)', color: editorTheme.text },
+    '.cm-tooltip-autocomplete ul li[aria-selected]': { backgroundColor: 'rgba(100,140,255,0.3)', color: editorTheme.text },
     '&.cm-focused .cm-matchingBracket': { backgroundColor: 'rgba(100,140,255,0.35)', outline: 'none' },
+    // compare mode (unifiedMergeView): low-alpha green/red so syntax colours stay readable
+    '.cm-changedLine, .cm-insertedLine': { backgroundColor: 'rgba(34,197,94,0.12)' },
+    '.cm-changedText, ins.cm-insertedLine': { backgroundColor: 'rgba(34,197,94,0.28)', textDecoration: 'none' },
+    '.cm-deletedChunk': { backgroundColor: 'rgba(239,68,68,0.12)', paddingLeft: '6px' },
+    '.cm-deletedChunk .cm-deletedLine, .cm-deletedChunk del': { backgroundColor: 'rgba(239,68,68,0.3)', textDecoration: 'none' },
+    '.cm-deletedChunk .cm-chunkButtons': { display: 'none' },
+    '.cm-changeGutter': { width: '4px', paddingLeft: '1px' },
+    '.cm-changedLineGutter': { backgroundColor: 'var(--green)' },
+    '.cm-deletedLineGutter': { backgroundColor: 'var(--red)' },
+    // small edits shown inside their line (allowInlineDiffs); the selectors outrank the library's own theme
+    '&.cm-merge-b .cm-inlineChangedLine': { backgroundColor: 'rgba(34,197,94,0.12)' },
+    '&.cm-merge-b .cm-inlineChangedLineGutter': { background: 'var(--green)' },
+    '&.cm-merge-b .cm-deletedText': { background: 'rgba(239,68,68,0.3)', textDecoration: 'line-through', textDecorationColor: 'var(--red)' },
+    // folded unchanged runs
+    '&.cm-merge-b .cm-collapsedLines': { color: 'var(--muted)', background: 'rgba(255,255,255,0.05)', cursor: 'pointer', fontSize: '12px' },
+    '&.cm-merge-b .cm-collapsedLines:hover': { color: editorTheme.text, background: 'rgba(255,255,255,0.09)' },
   },
   { dark: true },
 );
@@ -44,15 +62,60 @@ interface Props {
   error?: PineEditorError | null;
   ariaLabel?: string;
   minHeight?: number;
+  /** Called with the 1-based line and column of the cursor on every change of the selection or document. */
+  onCursor?: (line: number, col: number) => void;
+  /** When set, the editor marks what differs from this text (added, changed and removed lines). */
+  compareTo?: string;
+  /** Compare mode: change it to rebuild the diff (and so refold the unchanged runs) from the current `compareTo`. */
+  compareEpoch?: string | number;
+  /** Called instead of `onChange` when the user pastes or drops text over the document, so the page can treat it as a replacement. */
+  onReplace?: (value: string) => void;
 }
 
+// Loaded on first use so the diff library stays out of the chart app's main bundle.
+const loadMerge = (): Promise<MergeLib> => import('@codemirror/merge');
+
 /** CodeMirror 6 editor for Pine Script with highlighting, autocomplete and inline error markers. */
-export function PineEditor({ value, onChange, error, ariaLabel = 'Pine source', minHeight = 200 }: Props) {
+export function PineEditor({ value, onChange, error, ariaLabel = 'Pine source', minHeight = 200, onCursor, compareTo, compareEpoch, onReplace }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+  const onCursorRef = useRef(onCursor);
+  onCursorRef.current = onCursor;
   const sizing = useRef(new Compartment());
+  const merge = useRef(new Compartment());
+  const onReplaceRef = useRef(onReplace);
+  onReplaceRef.current = onReplace;
+  const compareRef = useRef(compareTo);
+  const epochRef = useRef(compareEpoch);
+  const shown = useRef(false);
+  // set when the diff must be rebuilt (folding is only computed when the extension is created)
+  const dirty = useRef(false);
+
+  // Bring the diff in line with compareTo and the document: off when not comparing or while the document is empty,
+  // freshly built when `dirty`, otherwise fed the new original as a minimal change so untouched chunks keep their DOM.
+  const sync = () =>
+    void loadMerge().then((lib) => {
+      const v = view.current;
+      if (!v) return;
+      const want = compareRef.current;
+      if (want === undefined || v.state.doc.length === 0) {
+        if (shown.current) v.dispatch({ effects: merge.current.reconfigure([]) });
+        shown.current = false;
+        dirty.current = false;
+      } else if (dirty.current || !shown.current) {
+        v.dispatch({ effects: merge.current.reconfigure(compareExtension(lib, want)) });
+        shown.current = true;
+        dirty.current = false;
+      } else {
+        const cur = lib.getOriginalDoc(v.state);
+        const change = originalChange(cur.toString(), want);
+        if (!change) return;
+        const changes = ChangeSet.of(change, cur.length);
+        v.dispatch({ effects: lib.updateOriginalDoc.of({ doc: changes.apply(cur), changes }) });
+      }
+    });
 
   useEffect(() => {
     const v = new EditorView({
@@ -74,10 +137,25 @@ export function PineEditor({ value, onChange, error, ariaLabel = 'Pine source', 
           keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
           theme,
           sizing.current.of(EditorView.theme({ '.cm-scroller': { minHeight: `${minHeight}px` } })),
+          merge.current.of([]),
           EditorState.tabSize.of(2),
           EditorView.contentAttributes.of({ 'aria-label': ariaLabel, spellcheck: 'false' }),
           EditorView.updateListener.of((u) => {
-            if (u.docChanged) onChangeRef.current(u.state.doc.toString());
+            if (u.docChanged) {
+              const text = u.state.doc.toString();
+              const replaced = u.transactions.some((tr) => tr.isUserEvent('input.paste') || tr.isUserEvent('input.drop'));
+              if (replaced && compareRef.current !== undefined) {
+                dirty.current = true;
+                sync();
+              }
+              if (replaced && onReplaceRef.current) onReplaceRef.current(text);
+              else onChangeRef.current(text);
+            }
+            if (u.docChanged || u.selectionSet) {
+              const head = u.state.selection.main.head;
+              const line = u.state.doc.lineAt(head);
+              onCursorRef.current?.(line.number, head - line.from + 1);
+            }
           }),
         ],
       }),
@@ -95,8 +173,39 @@ export function PineEditor({ value, onChange, error, ariaLabel = 'Pine source', 
     const v = view.current;
     if (!v) return;
     const cur = v.state.doc.toString();
-    if (cur !== value) v.dispatch({ changes: { from: 0, to: cur.length, insert: value } });
+    if (cur === value) return;
+    v.dispatch({ changes: { from: 0, to: cur.length, insert: value } });
+    if (compareRef.current !== undefined) {
+      dirty.current = true;
+      sync();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value]);
+
+  // The diff is off while the document is empty: turn it on or off as the document fills or empties.
+  const empty = value === '';
+  const wasEmpty = useRef(empty);
+  useEffect(() => {
+    if (wasEmpty.current === empty) return;
+    wasEmpty.current = empty;
+    if (compareRef.current !== undefined) {
+      dirty.current = true;
+      sync();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [empty]);
+
+  // Compare mode: switch the diff on or off, rebuild it when the epoch changes, otherwise feed the new original in place.
+  useEffect(() => {
+    compareRef.current = compareTo;
+    if (epochRef.current !== compareEpoch) {
+      epochRef.current = compareEpoch;
+      dirty.current = true;
+    }
+    if (compareTo === undefined && !shown.current) return;
+    sync();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareTo, compareEpoch]);
 
   useEffect(() => {
     const v = view.current;
