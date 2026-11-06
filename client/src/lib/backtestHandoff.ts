@@ -4,7 +4,7 @@
  * never imports the strategy maker. Only built-in signal strategies can be handed over.
  */
 import { canonicalInterval, type Interval } from '../../../shared/market.ts';
-import { getStrategy, strategies } from './backtest/strategies';
+import { getStrategy, strategies, visibleParams } from './backtest/strategies';
 import { providers } from './providers';
 
 export interface Handoff {
@@ -62,7 +62,7 @@ function handoffStrategy(id: unknown) {
 
 /** For example `fast 8, slow 34, long only`, for a toast. */
 export function handoffSettingsText(h: Pick<Handoff, 'strategyId' | 'params'>): string {
-  const specs = getStrategy(h.strategyId).params;
+  const specs = visibleParams(getStrategy(h.strategyId), h.params);
   return specs
     .filter((p) => p.key in h.params)
     .map((p) => {
