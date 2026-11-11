@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { afterEachCleanup, chartOf, stubStorage, track } from './stateTestKit';
+import { afterEachCleanup, chartOf, stubStorage, seedRaw, stored, storedRaw, track } from './stateTestKit';
 import { layoutSnapshot } from './store';
 
 afterEach(afterEachCleanup);
 
 const base = { providerId: 'demo', symbol: 'DEMO', timeframe: '1d', bars: 500 };
-const stored = (key: string) => JSON.parse(localStorage.getItem(`vost.${key}`)!);
 
 async function fresh() {
   vi.resetModules();
@@ -18,11 +17,11 @@ async function fresh() {
 describe('named layouts in the app store', () => {
   beforeEach(() => {
     stubStorage();
-    localStorage.setItem('vost.prefs.v1', JSON.stringify(base));
+    seedRaw('prefs.v1', JSON.stringify(base));
   });
 
   it('the first init seeds one "Unnamed" layout from the working layout and touches no other key', async () => {
-    localStorage.setItem('vost.watchlists.v1', 'not-a-watchlist-state');
+    seedRaw('watchlists.v1', 'not-a-watchlist-state');
     const app = await fresh();
     app.getState().init();
     const saved = stored('savedLayouts.v1');
@@ -35,13 +34,13 @@ describe('named layouts in the app store', () => {
   });
 
   it('a corrupt savedLayouts.v1 is replaced by a seed and layout.v1 is left alone', async () => {
-    localStorage.setItem('vost.savedLayouts.v1', '{oops');
+    seedRaw('savedLayouts.v1', '{oops');
     const layoutRaw = JSON.stringify({ nonsense: true });
-    localStorage.setItem('vost.layout.v1', layoutRaw);
+    seedRaw('layout.v1', layoutRaw);
     const app = await fresh();
     app.getState().init();
     expect(app.getState().savedLayouts.layouts).toHaveLength(1);
-    expect(localStorage.getItem('vost.layout.v1')).toBe(layoutRaw);
+    expect(storedRaw('layout.v1')).toBe(layoutRaw);
   });
 
   it('with autosave on a change reaches the current layout after the debounce, and flushPersist writes it at once', async () => {
@@ -118,6 +117,22 @@ describe('named layouts in the app store', () => {
     again.getState().init();
     expect(again.getState().savedLayouts.currentId).toBe(firstId);
     expect(layoutSnapshot(again.getState())).toEqual(snapshotA);
+  });
+
+  it('a named layout stored before the price scale mode existed is not modified after opening, and a mode makes it so', async () => {
+    const app = await fresh();
+    app.getState().init();
+    const firstId = app.getState().savedLayouts.currentId;
+    expect(app.getState().copyLayout('Old')).toBe(true);
+    const old = stored('savedLayouts.v1').layouts.find((l: { name: string }) => l.name === 'Old');
+    expect('priceScaleMode' in old.layout.charts[0]).toBe(false);
+    expect(app.getState().openLayout(firstId)).toBe(true);
+    expect(app.getState().openLayout(old.id)).toBe(true);
+    expect(app.getState().layoutDirty).toBe(false);
+    chartOf(app).getState().setPriceScaleMode('indexed');
+    expect(app.getState().layoutDirty).toBe(true);
+    chartOf(app).getState().setPriceScaleMode('linear');
+    expect(app.getState().layoutDirty).toBe(false);
   });
 
   it('opening with autosave on first saves the pending change into the layout being left', async () => {

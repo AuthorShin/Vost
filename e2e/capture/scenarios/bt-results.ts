@@ -33,6 +33,16 @@ export const btResults: Scenario = {
       await page.getByText('Equity curve & drawdown', { exact: false }).first().evaluate((el) => el.scrollIntoView({ block: 'start' }));
     });
     await ctx.screenshot('equity');
+    await ctx.step('scroll to the top of the metric grid and check the Max DD duration card has a time line', async () => {
+      const card = page.locator('.metric-card', { hasText: 'Max DD duration' });
+      await card.locator('.m-sub').waitFor();
+      await card.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+      await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+      const box = await card.boundingBox();
+      const vp = await page.evaluate(() => window.innerHeight);
+      if (!box || box.y < 0 || box.y + box.height > vp) throw new Error(`Max DD duration card is not fully in view: ${JSON.stringify(box)} in height ${vp}`);
+    });
+    await ctx.screenshot('metric-grid');
     await ctx.step('hover a card in the right-most column and see its tooltip inside the viewport', async () => {
       await page.locator('.metrics-grid').first().evaluate((el) => el.scrollIntoView({ block: 'start' }));
       const cards = page.locator('.metrics-grid').first().locator('.metric-card');
@@ -85,5 +95,95 @@ export const btResults: Scenario = {
       await page.getByText('Exit reasons', { exact: true }).evaluate((el) => el.scrollIntoView({ block: 'start' }));
     });
     await ctx.screenshot('exit-reasons');
+    await ctx.step('back to the Backtest pane: size by risk per trade, 2% at a 0.5% stop, and run', async () => {
+      await page.locator('.dock-tab', { hasText: 'Backtest' }).click();
+      await page.getByLabel('Position sizing').selectOption('risk');
+      await page.getByLabel('Risk per trade (%)').fill('2');
+      await page.getByLabel('Stop loss (%)').fill('0.5');
+      await page.getByLabel('Stop loss (%)').scrollIntoViewIfNeeded();
+    });
+    await ctx.screenshot('risk-setting');
+    await ctx.step('run and see the Max leverage card in Results', async () => {
+      await page.getByRole('button', { name: /Run backtest/ }).click();
+      await page.getByText(/Backtest finished/).waitFor();
+      await page.locator('.toast button').click();
+      await page.locator('.dock-tab', { hasText: 'Results' }).click();
+      const card = page.locator('.metric-card', { hasText: 'Max leverage' });
+      await card.waitFor();
+      await card.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    });
+    await ctx.screenshot('risk-results');
+    await ctx.step('clear the stop loss and run: it is refused', async () => {
+      await page.locator('.dock-tab', { hasText: 'Backtest' }).click();
+      await page.getByLabel('Stop loss (%)').fill('');
+      await page.getByRole('button', { name: /Run backtest/ }).click();
+      await page.getByText('Risk per trade needs a stop loss').waitFor();
+    });
+    await ctx.screenshot('risk-refused');
+    await ctx.step('size by percent of equity again and dismiss the refusal', async () => {
+      await page.getByLabel('Position sizing').selectOption('equity');
+      for (const close of await page.locator('.toast button').all()) await close.click();
+    });
+    await ctx.step('set an ATR stop, an R take profit and a 1.5 ATR trailing stop', async () => {
+      await page.getByLabel('Stop loss mode').selectOption('atr');
+      await page.getByLabel('Stop loss (ATR multiple)').fill('2');
+      await page.getByLabel('Take profit mode').selectOption('r');
+      await page.getByLabel('Take profit (times the stop)').fill('3');
+      await page.getByLabel('Trailing stop mode').selectOption('atr');
+      await page.getByLabel('Trailing stop (ATR multiple)').fill('1.5');
+      await page.getByLabel('ATR length').waitFor();
+      await page.getByLabel('ATR timeframe').selectOption('4');
+      await page.getByLabel('Stop loss mode').scrollIntoViewIfNeeded();
+    });
+    await ctx.screenshot('exits-setting');
+    await ctx.step('run and see the mode badges and a trailing stop in the trades list', async () => {
+      await page.getByRole('button', { name: /Run backtest/ }).click();
+      await page.getByText(/Backtest finished/).waitFor();
+      await page.locator('.toast', { hasText: /Backtest finished/ }).locator('button').click();
+      await page.locator('.dock-tab', { hasText: 'Results' }).click();
+      await page.getByText('SL 2 ATR', { exact: true }).waitFor();
+      await page.getByText('TP 3R', { exact: true }).waitFor();
+      await page.getByText('Trail 1.5 ATR', { exact: true }).waitFor();
+      await page.getByText('ATR 14 on 4x', { exact: true }).waitFor();
+      await page.getByRole('cell', { name: 'trailing stop', exact: true }).first().waitFor();
+      await page.getByText('SL 2 ATR', { exact: true }).evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    });
+    await ctx.screenshot('exits-badges');
+    await ctx.step('scroll to the trades list', async () => {
+      await page.getByRole('cell', { name: 'trailing stop', exact: true }).first().evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    });
+    await ctx.screenshot('exits-trades');
+    await ctx.step('pick Composed with an EMA entry, switch on the trend and volume filters, set the trend timeframe to 4x and see only their settings', async () => {
+      await page.locator('.dock-tab', { hasText: 'Backtest' }).click();
+      await page.getByLabel('Stop loss mode').selectOption('pct');
+      await page.getByLabel('Take profit mode').selectOption('pct');
+      await page.getByLabel('Trailing stop mode').selectOption('off');
+      await page.getByLabel('Stop loss (%)').fill('2');
+      await page.getByLabel('Strategy').selectOption('composed');
+      await page.getByLabel('Trend filter').selectOption('1');
+      await page.getByLabel('Volume filter').selectOption('1');
+      await page.getByLabel('Trend average length').waitFor();
+      await page.getByLabel('Trend timeframe').selectOption({ label: '4x the chart' });
+      if ((await page.getByLabel('Volatility timeframe').count()) !== 0) throw new Error('Volatility timeframe shows while the volatility filter is off');
+      await page.getByLabel('Volume multiple').waitFor();
+      if ((await page.getByLabel('ADX minimum').count()) !== 0) throw new Error('ADX minimum shows while the trend-strength filter is off');
+      if ((await page.getByLabel('Oversold').count()) !== 0) throw new Error('Oversold shows for an EMA entry');
+      await page.getByLabel('Entry rule').scrollIntoViewIfNeeded();
+    });
+    await ctx.screenshot('composed-settings');
+    await ctx.step('run and see the filter line in Results', async () => {
+      await page.getByRole('button', { name: /Run backtest/ }).click();
+      await page.getByText(/Backtest finished/).waitFor();
+      await page.locator('.toast button').last().click();
+      await page.locator('.dock-tab', { hasText: 'Results' }).click();
+      const line = page.getByTestId('filters-line');
+      await line.waitFor();
+      const text = (await line.textContent()) ?? '';
+      if (!/Filters: \d+ entry signals, \d+ taken - trend blocked \d+, volume blocked \d+/.test(text)) throw new Error(`Unexpected filter line: ${text}`);
+      await line.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+      const noScroll = await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
+      if (!noScroll) throw new Error('The filter line causes horizontal page scroll');
+    });
+    await ctx.screenshot('composed-filters');
   },
 };

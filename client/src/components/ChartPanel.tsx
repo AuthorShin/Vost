@@ -1,11 +1,13 @@
 import { DOWN_COLOR, UP_COLOR, chartTheme, theme } from '../lib/theme';
 import {
+  AreaSeries,
   CandlestickSeries,
   ColorType,
   CrosshairMode,
   HistogramSeries,
   LineSeries,
   LineStyle,
+  LineType,
   createChart,
   createSeriesMarkers,
   type IChartApi,
@@ -25,12 +27,21 @@ import { legendHtml } from '../lib/legend';
 import { ChartContextMenu } from './ChartContextMenu';
 import { ChartRangeBar } from './ChartRangeBar';
 import { fmtTick } from '../lib/time';
-import { newPaneState, releasePanes, sizePanes, usePaneLegends, type PaneReg, type PaneState } from './usePaneLegends';
-import { INDICATOR_META, computeIndicator, hexToRgba, type ComputedSeries } from '../lib/indicatorCompute';
+import { newPaneState, releasePanes, sizePanes, usePaneLegends, type OverlayReg, type PaneReg, type PaneState } from './usePaneLegends';
+import { INDICATOR_META, computeIndicator, hexToRgba, type ComputedSeries, type IndicatorSpec } from '../lib/indicatorCompute';
+import { seriesFormat, styledBuiltin, withOpacity, type StyledBuiltin } from '../lib/plotStyle';
+import { indicatorDrawn } from '../lib/indicatorSettings';
 import { getProvider } from '../lib/providers';
 import { useStore } from '../state/store';
 import { canPageOlder, selectDataCandles } from '../state/chart';
+import { IndicatorSettingsDialog } from './IndicatorSettingsDialog';
+import { PaneLegendActions, PriceLegendRows } from './IndicatorLegend';
+import { builtinParams, priceLegendRows } from '../lib/paneLegend';
 import { usePineSeries } from './usePineSeries';
+import { useBarCountdown } from './chart/useBarCountdown';
+import { usePriceScale } from './chart/usePriceScale';
+import { PriceScaleButtons } from './PriceScaleButtons';
+import { useVisibleHighLow } from './chart/useVisibleHighLow';
 import { mergeBarColors, sameBarColors } from '../lib/pine/barColors';
 import { useDrawings } from './chart/useDrawings';
 import { DrawingTextEditor } from './DrawingTextEditor';
@@ -43,15 +54,18 @@ import { FavoritesBar } from './FavoritesBar';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { historyNeededFrom, resetLogicalRange, resetRangeKey } from '../lib/quickRange';
 import { HISTORY_PREFETCH_BARS } from '../lib/historyPaging';
+import { carriedView, isAssetSwitch, windowBars, type SeriesIdentity } from '../lib/carryView';
+import { MIN_RANGE_BARS } from '../lib/timeRange';
 import { useChart, useChartStore } from '../state/chartContext';
 import { barTimeAt, drivesTime, publishCrosshair, publishTimeRange, sameTimeRange, setHovered, subscribe, type TimeRangeSync } from '../lib/layoutSync';
 
 type IndEntry = {
-  series: ISeriesApi<'Line'> | ISeriesApi<'Histogram'>;
+  series: ISeriesApi<'Line'> | ISeriesApi<'Histogram'> | ISeriesApi<'Area'>;
   kind: ComputedSeries['kind'];
 };
 
 const RIGHT_OFFSET = 3;
+const LINE_STYLE = { solid: LineStyle.Solid, dashed: LineStyle.Dashed, dotted: LineStyle.Dotted } as const;
 const UP = UP_COLOR;
 const DOWN = DOWN_COLOR;
 
@@ -67,10 +81,17 @@ function toCandleData(c: { time: number; open: number; high: number; low: number
   };
 }
 
-function mapIndicatorPoint(cs: ComputedSeries, point: { time: number; value: number; color?: string }) {
+function mapIndicatorPoint(st: StyledBuiltin, point: { time: number; value?: number; color?: string }) {
   const time = point.time as UTCTimestamp;
-  if (cs.kind === 'histogram') return { time, value: point.value, color: point.color ?? cs.color };
+  if (point.value === undefined) return { time };
+  if (st.type === 'histogram') return { time, value: point.value, color: point.color ?? st.color };
   return { time, value: point.value };
+}
+
+/** The series of `spec` as drawn under its style; the bar times are only read when a style is set. */
+function styledSeries(spec: IndicatorSpec, candles: ReadonlyArray<{ time: number }>) {
+  const times = spec.style ? candles.map((c) => c.time) : [];
+  return computeIndicator(spec, candles as never).map((cs) => ({ cs, st: styledBuiltin(cs, spec.style, times) }));
 }
 
 export function ChartPanel({
@@ -91,12 +112,16 @@ export function ChartPanel({
   const btResult = useChart((s) => s.btResult);
   const showTrades = useChart((s) => s.showTrades);
   const setShowTrades = useChart((s) => s.setShowTrades);
+  const priceScaleMode = useChart((s) => s.priceScaleMode);
+  const setPriceScaleMode = useChart((s) => s.setPriceScaleMode);
   const loadState = useChart((s) => s.loadState);
   const pineRuns = useChart((s) => s.pineRuns);
   const providerId = useChart((s) => s.providerId);
   const setProvider = useChart((s) => s.setProvider);
   const timeZone = useStore((s) => s.timeZone);
   const timeframe = useChart((s) => s.timeframe);
+  /** The indicators drawn at this timeframe: the one rule (see lib/indicatorSettings) every drawing site uses. */
+  const drawn = useMemo(() => indicators.filter((i) => indicatorDrawn(i, timeframe)), [indicators, timeframe]);
   const replayPhase = useChart((s) => s.replay?.phase ?? null);
   /** During replay: the last visible bar's time, the cut-off for trade markers and Pine output. */
   const replayCutoff = replayPhase === 'active' ? (candles[candles.length - 1]?.time ?? null) : null;
@@ -109,6 +134,9 @@ export function ChartPanel({
   const indMapRef = useRef(new Map<string, IndEntry>());
   const lastDataKeyRef = useRef('');
   const lastLeftEdgeRef = useRef<number | null>(null);
+  const lastSeriesRef = useRef<SeriesIdentity | null>(null);
+  /** Set from an asset switch until its carried window is shown: the views in between are not scroll backs. */
+  const carryingRef = useRef(false);
   const lastIndicatorsRef = useRef<unknown>(null);
   const lastCandlesRef = useRef<typeof candles | null>(null);
   const savedRangeRef = useRef<{ from: number; to: number } | null>(null);
@@ -116,6 +144,10 @@ export function ChartPanel({
   const paneEpochRef = useRef(0);
   const paneStateRef = useRef<PaneState>(newPaneState());
   const paneLegendsRef = useRef<HTMLDivElement | null>(null);
+  const legendRowsRef = useRef<HTMLDivElement | null>(null);
+  /** The indicator whose settings dialog is open from a legend row. */
+  const [settingsId, setSettingsId] = useState<string | null>(null);
+  const legendRows = useMemo(() => priceLegendRows(indicators, timeframe, pineRuns), [indicators, timeframe, pineRuns]);
 
   const precision = useMemo(() => {
     const last = candles[candles.length - 1];
@@ -204,6 +236,7 @@ export function ChartPanel({
     paneEpochRef.current++; // panes are dropped below: pine series must be rebuilt
     // Keep the sizes the user dragged the sub panes to, per indicator id, before removing series empties and drops them.
     releasePanes(chart, paneStateRef.current, 'all', new Set(indicators.map((i) => i.id)));
+    paneStateRef.current.overlays.clear(); // the Pine ones are rebuilt too: the epoch above says so
 
     for (const { series } of indMapRef.current.values()) {
       try {
@@ -223,7 +256,7 @@ export function ChartPanel({
       }
     }
 
-    const visible = indicators.filter((i) => i.visible);
+    const visible = drawn;
     const subCount = visible.filter((s) => s.kind === 'rsi' || s.kind === 'macd').length;
     for (let i = 0; i < subCount; i++) chart.addPane();
     sizePanes(
@@ -242,37 +275,69 @@ export function ChartPanel({
         subIdx++;
       }
       const legendEntries: PaneReg['entries'] = [];
+      const overlayEntries: OverlayReg['entries'] = [];
+      const candleTimes = spec.style ? chartStore.getState().candles.map((c) => c.time) : [];
       for (const cs of computed) {
-        const common = {
-          priceLineVisible: false,
-          lastValueVisible: cs.pane !== 'volume',
-          crosshairMarkerVisible: false,
-          lineWidth: (cs.lineWidth ?? 2) as LineWidth,
-          lineStyle: cs.dashed ? LineStyle.Dashed : LineStyle.Solid,
-        };
-        if (cs.kind === 'histogram') {
-          const series = chart.addSeries(
+        const st = styledBuiltin(cs, spec.style, candleTimes);
+        if (!st.visible) continue;
+        const fmt = seriesFormat(spec.style, cs.pane !== 'volume');
+        const priceLine = { priceLineVisible: st.priceLine, ...(st.priceLine && { priceLineColor: st.color }) };
+        let series: IndEntry['series'];
+        if (st.type === 'histogram') {
+          series = chart.addSeries(
             HistogramSeries,
             {
-              color: cs.color,
-              priceFormat: { type: cs.pane === 'volume' ? 'volume' : 'price' },
+              color: st.color,
+              priceFormat: fmt.priceFormat ?? { type: cs.pane === 'volume' ? 'volume' : 'price' },
               priceScaleId: cs.pane === 'volume' ? 'volume' : 'right',
-              lastValueVisible: cs.pane !== 'volume',
-              priceLineVisible: false,
+              lastValueVisible: fmt.lastValueVisible,
+              ...priceLine,
             },
             paneIndex,
           );
           if (cs.pane === 'volume') {
             chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
           }
-          indMapRef.current.set(`${spec.id}|${cs.key}`, { series, kind: 'histogram' });
-          if (cs.pane === 'sub') legendEntries.push({ title: cs.title, color: cs.color, series });
-        } else {
-          const series = chart.addSeries(
-            LineSeries,
-            { color: cs.color, ...common, priceScaleId: 'right' },
+        } else if (st.type === 'area') {
+          series = chart.addSeries(
+            AreaSeries,
+            {
+              lineColor: st.color,
+              topColor: withOpacity(st.color, 35),
+              bottomColor: withOpacity(st.color, 0),
+              lineWidth: st.width as LineWidth,
+              lineStyle: LINE_STYLE[st.lineStyle],
+              ...(fmt.priceFormat && { priceFormat: fmt.priceFormat }),
+              lastValueVisible: fmt.lastValueVisible,
+              crosshairMarkerVisible: false,
+              priceScaleId: cs.pane === 'volume' ? 'volume' : 'right',
+              ...priceLine,
+            },
             paneIndex,
           );
+          if (cs.pane === 'volume') {
+            chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+          }
+        } else {
+          series = chart.addSeries(
+            LineSeries,
+            {
+              color: st.color,
+              lineWidth: st.width as LineWidth,
+              lineStyle: LINE_STYLE[st.lineStyle],
+              ...(st.type === 'step' && { lineType: LineType.WithSteps }),
+              ...(st.type === 'circles' && { lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: st.width + 1 }),
+              ...(fmt.priceFormat && { priceFormat: fmt.priceFormat }),
+              lastValueVisible: fmt.lastValueVisible,
+              crosshairMarkerVisible: false,
+              priceScaleId: cs.pane === 'volume' ? 'volume' : 'right',
+              ...priceLine,
+            },
+            paneIndex,
+          );
+          if (cs.pane === 'volume') {
+            chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+          }
           for (const pl of cs.priceLines ?? []) {
             series.createPriceLine({
               price: pl.value,
@@ -283,27 +348,44 @@ export function ChartPanel({
               title: '',
             });
           }
-          indMapRef.current.set(`${spec.id}|${cs.key}`, { series, kind: 'line' });
-          if (cs.pane === 'sub') legendEntries.push({ title: cs.title, color: cs.color, series });
         }
+        indMapRef.current.set(`${spec.id}|${cs.key}`, { series, kind: cs.kind });
+        const entry = { title: cs.title, color: st.color, series: series as never, ...(cs.pane === 'volume' && { compact: true }) };
+        if (cs.pane === 'sub') legendEntries.push(entry);
+        else overlayEntries.push(entry);
       }
-      if (paneIndex > 0 && legendEntries.length > 0) {
+      // The status line's values can be turned off: the row keeps its name and buttons.
+      const valuesOn = spec.style?.valuesInStatusLine !== false;
+      const precision = spec.style?.precision;
+      const shownOverlay = valuesOn ? overlayEntries : [];
+      const shownLegend = valuesOn ? legendEntries : [];
+      if (overlayEntries.length > 0) {
+        // One plot: the row's name already says what it is.
+        paneStateRef.current.overlays.set(spec.id, {
+          id: spec.id,
+          source: 'builtin',
+          precision,
+          entries: shownOverlay.length === 1 ? [{ ...shownOverlay[0], title: '' }] : shownOverlay,
+        });
+      }
+      if (paneIndex > 0) {
         paneStateRef.current.panes.set(spec.id, {
           id: spec.id,
           source: 'builtin',
           paneIndex,
           name: INDICATOR_META[spec.kind].name,
-          params: INDICATOR_META[spec.kind].params.map((p) => String(spec.params[p.key])),
+          params: builtinParams(spec),
+          precision,
           // One plot: the name already says what it is.
-          entries: legendEntries.length === 1 ? [{ ...legendEntries[0], title: '' }] : legendEntries,
+          entries: shownLegend.length === 1 ? [{ ...shownLegend[0], title: '' }] : shownLegend,
         });
       }
     }
-  }, [chartApi, indicators]);
+  }, [chartApi, drawn]);
 
-  usePineSeries(chartApi, indicators, pineRuns, paneEpochRef, replayCutoff, paneStateRef);
+  usePineSeries(chartApi, drawn, pineRuns, paneEpochRef, replayCutoff, paneStateRef);
   /* barcolor() of the visible Pine scripts: kept as the same map while its content is unchanged. */
-  const mergedBarColors = useMemo(() => mergeBarColors(indicators, pineRuns, replayCutoff), [indicators, pineRuns, replayCutoff]);
+  const mergedBarColors = useMemo(() => mergeBarColors(drawn, pineRuns, replayCutoff), [drawn, pineRuns, replayCutoff]);
   const barColorsRef = useRef(mergedBarColors);
   if (!sameBarColors(barColorsRef.current, mergedBarColors)) barColorsRef.current = mergedBarColors;
   const barColors = barColorsRef.current;
@@ -316,6 +398,14 @@ export function ChartPanel({
     const lines = cursorKind === 'cross';
     chartApi?.applyOptions({ crosshair: { vertLine: { visible: lines }, horzLine: { visible: lines } } });
   }, [chartApi, cursorKind]);
+  const lastBarRef = useRef({ candles, barColors });
+  lastBarRef.current = { candles, barColors };
+  useBarCountdown(chartApi, chartApi ? candleSeriesRef.current : null, () => {
+    const { candles: cs, barColors: bc } = lastBarRef.current;
+    const c = cs[cs.length - 1];
+    return c ? { time: c.time, close: c.close, up: c.close >= c.open, color: bc.get(c.time) } : null;
+  }, timeframe, replayPhase);
+  useVisibleHighLow(chartApi, chartApi ? candleSeriesRef.current : null);
   const drawings = useDrawings(chartApi, chartApi ? candleSeriesRef.current : null, containerRef, active);
 
   /* Entering replay: remember the view before the data effect cuts the bars. Exit restores it (below). */
@@ -325,6 +415,73 @@ export function ChartPanel({
     savedRangeRef.current = r ? { from: r.from, to: r.to } : null;
   }, [chartApi, replayPhase === 'active']);
 
+  /* After an asset switch scrolled back: show the same time window, paging older bars in first when it starts before the first one. */
+  async function showCarriedWindow(from: number, to: number, needFrom: number | null, key: string) {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const stale = () => chartStore.getState().dataKey !== key || chartRef.current !== chart;
+    try {
+      await carryWindow(chart, from, to, needFrom, stale);
+    } finally {
+      if (!stale()) carryingRef.current = false;
+    }
+  }
+
+  async function carryWindow(chart: IChartApi, from: number, to: number, needFrom: number | null, stale: () => boolean) {
+    const st = chartStore.getState();
+    if (needFrom != null && canPageOlder(st, useStore.getState().historyLoading)) {
+      await st.loadHistoryTo(needFrom);
+      if (stale()) return;
+    }
+    // One frame later: a range set in the same frame as new or merged bars is overridden by the chart's own update for them.
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    if (stale()) return;
+    const cs = chartStore.getState().candles;
+    if (cs.length === 0) return;
+    const start = Math.max(from, cs[0].time);
+    lastLeftEdgeRef.current = null; // moving to the carried window is not a scroll back: do not page for it
+    try {
+      if (needFrom != null && windowBars(cs, start, to) < MIN_RANGE_BARS) chart.timeScale().fitContent();
+      else chart.timeScale().setVisibleRange({ from: start as UTCTimestamp, to: to as UTCTimestamp });
+    } catch {
+      chart.timeScale().fitContent();
+    }
+    lastLeftEdgeRef.current = chart.timeScale().getVisibleLogicalRange()?.from ?? null;
+  }
+
+  /* Older bar time the timeframe's default window needs paged in, or null when none is needed or possible. */
+  function defaultWindowNeed(st: ReturnType<typeof chartStore.getState>): number | null {
+    return canPageOlder(st, useStore.getState().historyLoading) ? historyNeededFrom(resetRangeKey(timeframe), st.candles, timeZone) : null;
+  }
+
+  /* Page older bars in until the timeframe's window is covered, then show it (all data when it does not apply).
+     Shared by Reset view and the load path; abandoned when another series loads meanwhile. */
+  async function showDefaultWindow(key: string) {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const stale = () => chartStore.getState().dataKey !== key || chartRef.current !== chart;
+    carryingRef.current = true;
+    try {
+      const need = defaultWindowNeed(chartStore.getState());
+      if (need != null) {
+        await chartStore.getState().loadHistoryTo(need);
+        if (stale()) return;
+      }
+      // One frame later: a range set in the same frame as new or merged bars is overridden by the chart's own update for them.
+      await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      if (stale()) return;
+      const cs = chartStore.getState().candles;
+      if (cs.length === 0) return;
+      lastLeftEdgeRef.current = null; // showing the window is not a scroll back: do not page for it
+      const range = resetLogicalRange(timeframe, cs, timeZone, RIGHT_OFFSET);
+      if (range) chart.timeScale().setVisibleLogicalRange(range);
+      else chart.timeScale().fitContent();
+      lastLeftEdgeRef.current = chart.timeScale().getVisibleLogicalRange()?.from ?? null;
+    } finally {
+      if (!stale()) carryingRef.current = false;
+    }
+  }
+
   /* ---------------- push data (full or incremental) ---------------- */
   useEffect(() => {
     const chart = chartApi;
@@ -332,11 +489,23 @@ export function ChartPanel({
     if (!chart || !candleSeries || candles.length === 0) return;
 
     const dataChanged = lastDataKeyRef.current !== dataKey;
-    const indChanged = lastIndicatorsRef.current !== indicators;
+    const indChanged = lastIndicatorsRef.current !== drawn;
 
     // One bar appended or the last bar changed: send just that bar. Any other change to the same data
     // (replay entering, stepping back, exiting, a merged backfill) replaces the bars without refitting.
     const prev = lastCandlesRef.current;
+    // The view of the series being replaced, read before setData: an asset switch on the same timeframe carries it over.
+    const ts = chart.timeScale();
+    const oldLogical = dataChanged ? ts.getVisibleLogicalRange() : null;
+    const oldTimes = dataChanged ? ts.getVisibleRange() : null;
+    const oldLength = prev?.length ?? 0;
+    const st0 = chartStore.getState();
+    const series: SeriesIdentity = {
+      providerId: st0.providerId,
+      symbol: st0.symbol,
+      timeframe: st0.timeframe,
+      datasetId: st0.activeDatasetId ?? (st0.chartRange != null ? 'range' : null),
+    };
     const incremental =
       !dataChanged &&
       prev != null &&
@@ -354,7 +523,35 @@ export function ChartPanel({
       candleSeries.setData(candles.map((c) => toCandleData(c, barColors)));
       lastDataKeyRef.current = dataKey;
       lastLeftEdgeRef.current = null; // the fit below is not a scroll back: do not page for it
-      chart.timeScale().fitContent();
+      carryingRef.current = false;
+      const carried =
+        oldLogical && isAssetSwitch(lastSeriesRef.current, series)
+          ? carriedView({ logical: oldLogical, from: oldTimes ? Number(oldTimes.from) : null, to: oldTimes ? Number(oldTimes.to) : null, length: oldLength }, candles)
+          : null;
+      lastSeriesRef.current = series;
+      if (carried?.kind === 'logical') {
+        ts.setVisibleLogicalRange(carried.range);
+        lastLeftEdgeRef.current = carried.range.from;
+      } else if (carried) {
+        carryingRef.current = true;
+        void showCarriedWindow(carried.from, carried.to, carried.needFrom, dataKey);
+      } else if (st0.chartRange != null) {
+        ts.fitContent();
+      } else {
+        // A fresh series opens on the Reset view window; fit first so the chart is not blank while older bars page in.
+        const needsPaging = defaultWindowNeed(chartStore.getState()) != null;
+        const range = needsPaging ? null : resetLogicalRange(timeframe, candles, timeZone, RIGHT_OFFSET);
+        if (range) {
+          ts.setVisibleLogicalRange(range);
+          lastLeftEdgeRef.current = range.from;
+        } else {
+          ts.fitContent();
+          if (needsPaging) {
+            carryingRef.current = true;
+            void showDefaultWindow(dataKey);
+          }
+        }
+      }
     } else if (incremental && sentBarColorsRef.current === barColors) {
       candleSeries.update(toCandleData(candles[candles.length - 1], barColors));
     } else {
@@ -363,31 +560,27 @@ export function ChartPanel({
     }
 
     if (dataChanged || indChanged || !incremental) {
-      for (const spec of indicators) {
-        if (!spec.visible) continue;
-        for (const cs of computeIndicator(spec, candles)) {
+      for (const spec of drawn) {
+        for (const { cs, st } of styledSeries(spec, candles)) {
           const entry = indMapRef.current.get(`${spec.id}|${cs.key}`);
           if (!entry) continue;
-          const data = cs.data.map((p) => mapIndicatorPoint(cs, p));
-          if (entry.kind === 'histogram') (entry.series as ISeriesApi<'Histogram'>).setData(data as never);
-          else (entry.series as ISeriesApi<'Line'>).setData(data as never);
+          const data = st.data.map((p) => mapIndicatorPoint(st, p));
+          (entry.series as ISeriesApi<'Line'>).setData(data as never);
         }
       }
-      lastIndicatorsRef.current = indicators;
+      lastIndicatorsRef.current = drawn;
     } else {
-      for (const spec of indicators) {
-        if (!spec.visible) continue;
-        for (const cs of computeIndicator(spec, candles)) {
+      for (const spec of drawn) {
+        for (const { cs, st } of styledSeries(spec, candles)) {
           const entry = indMapRef.current.get(`${spec.id}|${cs.key}`);
-          if (!entry || cs.data.length === 0) continue;
-          const point = mapIndicatorPoint(cs, cs.data[cs.data.length - 1]);
-          if (entry.kind === 'histogram') (entry.series as ISeriesApi<'Histogram'>).update(point as never);
-          else (entry.series as ISeriesApi<'Line'>).update(point as never);
+          if (!entry || st.data.length === 0) continue;
+          const point = mapIndicatorPoint(st, st.data[st.data.length - 1]);
+          (entry.series as ISeriesApi<'Line'>).update(point as never);
         }
       }
     }
 
-    if (prepended) {
+    if (prepended && !carryingRef.current) {
       const r = chart.timeScale().getVisibleLogicalRange();
       lastLeftEdgeRef.current = r ? r.from : null;
       if (r && r.from < HISTORY_PREFETCH_BARS) void chartStore.getState().loadOlder(); // still near the left edge: the next page
@@ -396,7 +589,7 @@ export function ChartPanel({
     sentBarColorsRef.current = barColors;
     updateLegend(candles[candles.length - 1]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartApi, candles, dataKey, indicators]);
+  }, [chartApi, candles, dataKey, drawn]);
 
   /* A backtest or optimizer run that loaded older history asks the chart to show its range (once). */
   const viewRequest = useChart((s) => s.viewRequest);
@@ -430,7 +623,7 @@ export function ChartPanel({
     if (!chartApi) return;
     const ts = chartApi.timeScale();
     const onRange = (r: LogicalRange | null) => {
-      if (!r) return;
+      if (!r || carryingRef.current) return;
       const prevFrom = lastLeftEdgeRef.current;
       lastLeftEdgeRef.current = r.from;
       // Only a move of the left edge toward older bars counts: a prepend shifts it right, a fresh fit is the first sample.
@@ -625,6 +818,7 @@ export function ChartPanel({
     plugin.setMarkers(markers);
   }, [btResult, showTrades, chartApi, replayCutoff]);
 
+  const priceScale = usePriceScale(chartApi, containerRef, priceScaleMode);
   const provider = getProvider(providerId);
 
   // Restore the fresh-load view: auto-scale every pane's price scales, default right offset, then show the window for the
@@ -641,14 +835,9 @@ export function ChartPanel({
         }
       }
     }
+    priceScale.refresh();
     chartApi.timeScale().applyOptions({ rightOffset: RIGHT_OFFSET });
-    // Page in older bars until the timeframe's window is covered (or the history start stops it).
-    const st = chartStore.getState();
-    const need = canPageOlder(st, useStore.getState().historyLoading) ? historyNeededFrom(resetRangeKey(timeframe), st.candles, timeZone) : null;
-    if (need != null) await st.loadHistoryTo(need);
-    const range = resetLogicalRange(timeframe, chartStore.getState().candles, timeZone, RIGHT_OFFSET);
-    if (range) chartApi.timeScale().setVisibleLogicalRange(range);
-    else chartApi.timeScale().fitContent();
+    await showDefaultWindow(chartStore.getState().dataKey);
   }
 
   const favorites = useStore((s) => s.drawingFavorites);
@@ -677,14 +866,21 @@ export function ChartPanel({
     onDeleteAll: drawings.deleteAll,
   };
 
-  usePaneLegends(chartApi, paneStateRef, paneLegendsRef, [indicators, pineRuns, candles, replayCutoff]);
+  const paneLegends = usePaneLegends(chartApi, paneStateRef, paneLegendsRef, legendRowsRef, setSettingsId, [drawn, pineRuns, candles, replayCutoff]);
+  const paneLabels = new Map([...paneStateRef.current.panes].map(([id, p]) => [id, [p.name, ...p.params].join(' ')] as const));
+  const pineIds = new Set(indicators.filter((i) => i.kind === 'pine').map((i) => i.id));
 
   return (
     <div className="chart-wrap">
       <DrawingRail {...drawingControls} />
       <div className="chart-main">
-      <div className="chart-legend" ref={legendRef} />
+      <div className="chart-legend">
+        <div className="legend-head" ref={legendRef} />
+        <PriceLegendRows rows={legendRows} overlays={paneStateRef.current.overlays} onSettings={setSettingsId} rowsRef={legendRowsRef} />
+      </div>
       <div className="pane-legends" ref={paneLegendsRef} />
+      <PaneLegendActions hosts={paneLegends.actionHosts} pineIds={pineIds} labels={paneLabels} onSettings={setSettingsId} />
+      {settingsId && indicators.some((i) => i.id === settingsId) && <IndicatorSettingsDialog id={settingsId} onClose={() => setSettingsId(null)} />}
       <div className={`chart-container${replayPhase === 'picking' ? ' picking' : ''}`} ref={containerRef} />
       {drawings.editor && (
         <DrawingTextEditor
@@ -706,7 +902,8 @@ export function ChartPanel({
       {drawings.settings && <DrawingSettingsDialog key={drawings.settings.drawing.id} model={drawings.settings} />}
       {active && favorites.length > 0 && <FavoritesBar {...drawingControls} />}
       <ChartRangeBar chartApi={chartApi} />
-      <ChartContextMenu containerRef={containerRef} seriesRef={candleSeriesRef} precision={precision} enabled={candles.length > 0} onAddAlert={onAddAlert} drawings={drawings.actions} />
+      <ChartContextMenu containerRef={containerRef} seriesRef={candleSeriesRef} precision={precision} enabled={candles.length > 0} onAddAlert={onAddAlert} drawings={drawings.actions} priceScaleMode={priceScaleMode} onPriceScaleMode={setPriceScaleMode} autoScale={priceScale.auto} onAutoScale={priceScale.setAuto} />
+      <PriceScaleButtons control={priceScale} mode={priceScaleMode} onMode={setPriceScaleMode} disabled={candles.length === 0} />
       <div className="chart-toolbar">
         {narrow && <DrawingMenu {...drawingControls} />}
         <button

@@ -3,7 +3,7 @@ import { fmtTime } from '../lib/format';
 import type { Candle } from '../types';
 import * as providersModule from '../lib/providers';
 import { createChartStore, defaultChartInitial, type ChartEnv } from './chart';
-import { afterEachCleanup, chartOf, stubStorage, track, snap } from './stateTestKit';
+import { afterEachCleanup, chartOf, stubStorage, allStoredRaw, seedRaw, stored, storedRaw, track, snap } from './stateTestKit';
 
 afterEach(afterEachCleanup);
 
@@ -80,7 +80,7 @@ describe('pine indicators', () => {
       const id = pineId(useStore);
       chartOf(useStore).getState().updateIndicator(id, { source: '//@version=6\nindicator("X")\nplot(close)\n', inputs: { Fast: 4 } });
       vi.advanceTimersByTime(1000);
-      const raw = localStorage.getItem('vost.prefs.v1');
+      const raw = storedRaw('prefs.v1');
       expect(raw).not.toBeNull();
       // Reload: a fresh store reads the same prefs back.
       vi.resetModules();
@@ -96,9 +96,119 @@ describe('pine indicators', () => {
     }
   });
 
+  const OTHER = '//@version=6\nindicator("Other title")\nplot(close)\n';
+
+  it('keeps editor text as a draft without running, and clears it when it equals the source', async () => {
+    const runs: string[] = [];
+    class CountingWorker {
+      onmessage: ((ev: MessageEvent) => void) | null = null;
+      onerror: (() => void) | null = null;
+      postMessage(req: { id: string; source: string; candles: Candle[]; inputs: Record<string, unknown> }) {
+        runs.push(req.source);
+        void import('../lib/pine/runtime').then(async ({ runPine }) => {
+          const outcome = await runPine(req.source, req.candles, req.inputs as never);
+          this.onmessage?.({ data: { id: req.id, type: 'pineResult', outcome } } as MessageEvent);
+        });
+      }
+    }
+    vi.stubGlobal('Worker', CountingWorker);
+    const { useStore } = await setup();
+    chartOf(useStore).getState().addIndicator('pine');
+    const id = pineId(useStore);
+    const run = await settle(useStore, id);
+    const before = runs.length;
+    expect(before).toBeGreaterThan(0);
+    const source = chartOf(useStore).getState().indicators.find((i) => i.id === id)!.source;
+    chartOf(useStore).getState().setPineDraft(id, OTHER);
+    const spec = chartOf(useStore).getState().indicators.find((i) => i.id === id)!;
+    expect(spec.draft).toBe(OTHER);
+    expect(spec.source).toBe(source);
+    expect(chartOf(useStore).getState().pineRuns[id]).toBe(run);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(chartOf(useStore).getState().pineRuns[id]).toBe(run);
+    expect(runs).toHaveLength(before);
+    chartOf(useStore).getState().setPineDraft(id, source!);
+    expect('draft' in chartOf(useStore).getState().indicators.find((i) => i.id === id)!).toBe(false);
+  });
+
+  it('applies a draft: source becomes the draft, draft cleared, one run; no-op without a draft', async () => {
+    const { useStore } = await setup();
+    chartOf(useStore).getState().addIndicator('pine');
+    const id = pineId(useStore);
+    const first = await settle(useStore, id);
+    chartOf(useStore).getState().applyPineDraft(id);
+    expect(chartOf(useStore).getState().pineRuns[id]).toBe(first);
+    chartOf(useStore).getState().setPineDraft(id, OTHER);
+    chartOf(useStore).getState().applyPineDraft(id);
+    const spec = chartOf(useStore).getState().indicators.find((i) => i.id === id)!;
+    expect(spec.source).toBe(OTHER);
+    expect('draft' in spec).toBe(false);
+    await vi.waitFor(() => expect(chartOf(useStore).getState().pineRuns[id].result?.declaration.title).toBe('Other title'), { timeout: 20000 });
+  });
+
+  it('persists a draft in prefs', async () => {
+    vi.useFakeTimers();
+    try {
+      const { useStore } = await setup();
+      chartOf(useStore).getState().addIndicator('pine');
+      const id = pineId(useStore);
+      chartOf(useStore).getState().setPineDraft(id, OTHER);
+      vi.advanceTimersByTime(1000);
+      vi.resetModules();
+      vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+      const fresh = track((await import('./store')).useStore);
+      fresh.getState().init();
+      const pine = chartOf(fresh).getState().indicators.find((i) => i.id === id)!;
+      expect(pine.draft).toBe(OTHER);
+      expect(pine.source).toContain('EMA cross');
+      // prefs saved without a draft load with no draft
+      chartOf(fresh).getState().setPineDraft(id, pine.source!);
+      vi.advanceTimersByTime(1000);
+      vi.resetModules();
+      const again = track((await import('./store')).useStore);
+      again.getState().init();
+      expect('draft' in chartOf(again).getState().indicators.find((i) => i.id === id)!).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-runs on a Calculation override and persists it; other settings are kept when one changes', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    try {
+      const { useStore, candles } = await setup();
+      chartOf(useStore).getState().addIndicator('pine');
+      const id = pineId(useStore);
+      const src = '//@version=6\nindicator("X", timeframe="")\nplot(close)\n';
+      chartOf(useStore).getState().updateIndicator(id, { source: src });
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(chartOf(useStore).getState().pineRuns[id]?.result?.calculation).toEqual({ timeframe: '', gaps: true }), { timeout: 20000 });
+      const first = chartOf(useStore).getState().pineRuns[id].result!;
+      expect(first.plots[0].values.filter((v) => v !== null)).toHaveLength(candles.length);
+
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      chartOf(useStore).getState().updateIndicator(id, { calculation: { timeframe: 'W' } });
+      chartOf(useStore).getState().updateIndicator(id, { calculation: { gaps: false } });
+      vi.advanceTimersByTime(1000);
+      const raw = stored('prefs.v1');
+      expect(raw.indicators.find((i: { id: string }) => i.id === id).calculation).toEqual({ timeframe: 'W', gaps: false });
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(chartOf(useStore).getState().pineRuns[id]?.error).toBeDefined(), { timeout: 20000 });
+      const second = await settle(useStore, id);
+      // The test chart has no server to load weekly bars from; the message shows the request carried the setting.
+      expect(second.error?.message).toMatch(/^Calculation timeframe W /);
+      vi.resetModules();
+      vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+      const fresh = track((await import('./store')).useStore);
+      fresh.getState().init();
+      expect(chartOf(fresh).getState().indicators.find((i) => i.id === id)!.calculation).toEqual({ timeframe: 'W', gaps: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('loads old saved prefs that have no pine entries', async () => {
-    localStorage.setItem(
-      'vost.prefs.v1',
+    seedRaw('prefs.v1',
       JSON.stringify({
         providerId: 'binance',
         symbol: 'BTCUSDT',
@@ -155,12 +265,12 @@ describe('btRange', () => {
     const candles = candlesFromCsvText(text).candles;
     const { useStore } = await import('./store');
     track(useStore);
-    chartOf(useStore).setState({ candles });
+    chartOf(useStore).setState({ candles, historyStart: true }); // a fixed series: Full data runs must not page older bars
     return { useStore, candles };
   }
 
   const freshFromPrefs = async (btRange: unknown) => {
-    localStorage.setItem('vost.prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, btRange }));
+    seedRaw('prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, btRange }));
     vi.resetModules();
     vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
     const fresh = track((await import('./store')).useStore);
@@ -608,6 +718,61 @@ describe('btRange', () => {
     expect(s.toasts.some((t) => t.kind === 'error' && t.text.includes('From is later than To'))).toBe(true);
   });
 
+  it('risk per trade without a stop loss starts nothing and says why, for the backtest and the optimizer', async () => {
+    const { useStore } = await setup();
+    const st = () => chartOf(useStore).getState();
+    const posts: unknown[] = [];
+    class SpyWorker {
+      onmessage: ((e: unknown) => void) | null = null;
+      postMessage(m: unknown) { posts.push(m); }
+      terminate() {}
+    }
+    vi.stubGlobal('Worker', SpyWorker);
+    st().setBtConfig({ riskPct: 2, stopLossPct: null });
+    await st().runBacktest();
+    await st().runOptimizer();
+    const refusals = snap(useStore).toasts.filter((t) => t.kind === 'error' && t.text === 'Risk per trade needs a stop loss');
+    expect(refusals).toHaveLength(2);
+    expect(posts).toHaveLength(0);
+    expect(st().btResult).toBeNull();
+    expect(st().btRunning).toBe(false);
+    expect(st().optRunning).toBe(false);
+  });
+
+  it('risk per trade runs with an ATR stop or only a trailing stop', async () => {
+    const { useStore } = await setup();
+    const st = () => chartOf(useStore).getState();
+    for (const over of [
+      { stopMode: 'atr' as const, stopAtrMult: 2 },
+      { trailMode: 'pct' as const, trailPct: 3 },
+    ]) {
+      st().setBtConfig({ riskPct: 2, stopLossPct: null, ...over });
+      await st().runBacktest();
+      expect(snap(useStore).toasts.filter((t) => t.kind === 'error' && t.text === 'Risk per trade needs a stop loss')).toHaveLength(0);
+      expect(st().btResult).not.toBeNull();
+      st().clearBacktest();
+    }
+  });
+
+  it('a take profit in times the stop with no stop starts nothing and says why, for the backtest and the optimizer', async () => {
+    const { useStore } = await setup();
+    const st = () => chartOf(useStore).getState();
+    const posts: unknown[] = [];
+    class SpyWorker {
+      onmessage: ((e: unknown) => void) | null = null;
+      postMessage(m: unknown) { posts.push(m); }
+      terminate() {}
+    }
+    vi.stubGlobal('Worker', SpyWorker);
+    st().setBtConfig({ takeProfitMode: 'r', takeProfitR: 2, stopLossPct: null, trailMode: 'off' });
+    await st().runBacktest();
+    await st().runOptimizer();
+    const refusals = snap(useStore).toasts.filter((t) => t.kind === 'error' && t.text === 'A take profit in times the stop needs a stop loss or a trailing stop');
+    expect(refusals).toHaveLength(2);
+    expect(posts).toHaveLength(0);
+    expect(st().btResult).toBeNull();
+  });
+
   it('a range with fewer than 3 bars starts nothing', async () => {
     const { useStore, candles } = await setup();
     chartOf(useStore).getState().setBtRange({ from: candles[5].time, to: candles[6].time });
@@ -622,8 +787,8 @@ describe('btRange', () => {
       const { useStore } = await setup();
       chartOf(useStore).getState().setBtRange({ from: 100, to: null });
       vi.advanceTimersByTime(1000);
-      expect(JSON.parse(localStorage.getItem('vost.prefs.v1')!).btRange).toEqual({ from: 100, to: null });
-      const fresh = await freshFromPrefs(JSON.parse(localStorage.getItem('vost.prefs.v1')!).btRange);
+      expect(stored('prefs.v1').btRange).toEqual({ from: 100, to: null });
+      const fresh = await freshFromPrefs(stored('prefs.v1').btRange);
       expect(chartOf(fresh).getState().btRange).toEqual({ from: 100, to: null });
     } finally {
       vi.useRealTimers();
@@ -892,7 +1057,7 @@ describe('chartRange', () => {
       await chartOf(useStore).getState().setChartRange({ from: candles[20].time, to: candles[80].time });
       chartOf(useStore).getState().setBars(300);
       vi.advanceTimersByTime(1000);
-      expect(localStorage.getItem('vost.prefs.v1')).not.toContain('chartRange');
+      expect(storedRaw('prefs.v1')).not.toContain('chartRange');
       vi.resetModules();
       vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
       const fresh = track((await import('./store')).useStore);
@@ -1129,7 +1294,7 @@ describe('replay', () => {
     const candles = candlesFromCsvText(text).candles;
     const { useStore } = await import('./store');
     track(useStore);
-    chartOf(useStore).setState({ candles });
+    chartOf(useStore).setState({ candles, historyStart: true });
     return { useStore, candles };
   }
   type Store = Awaited<ReturnType<typeof setup>>['useStore'];
@@ -1537,7 +1702,7 @@ describe('replay', () => {
   it('drawing magnet and hide-all: default off, persisted, bad values load as off', async () => {
     const load = async (prefs: Record<string, unknown>) => {
       vi.resetModules();
-      localStorage.setItem('vost.prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, ...prefs }));
+      seedRaw('prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, ...prefs }));
       vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
       const st = track((await import('./store')).useStore);
       st.getState().init();
@@ -1550,7 +1715,7 @@ describe('replay', () => {
     old.getState().setDrawingMagnet(true);
     old.getState().setDrawingsHidden(true);
     old.getState().flushPersist();
-    const saved = JSON.parse(localStorage.getItem('vost.prefs.v1')!);
+    const saved = stored('prefs.v1');
     expect(saved.drawingMagnet).toBe(true);
     expect(saved.drawingsHidden).toBe(true);
 
@@ -1569,7 +1734,7 @@ describe('replay', () => {
   it('drawing magnet strength, lock all and stay mode: defaults, persisted, old and bad values', async () => {
     const load = async (prefs: Record<string, unknown>) => {
       vi.resetModules();
-      localStorage.setItem('vost.prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, ...prefs }));
+      seedRaw('prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, ...prefs }));
       vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
       const st = track((await import('./store')).useStore);
       st.getState().init();
@@ -1582,7 +1747,7 @@ describe('replay', () => {
     fresh.getState().setDrawingsLocked(true);
     fresh.getState().setDrawingStayMode(true);
     fresh.getState().flushPersist();
-    const saved = JSON.parse(localStorage.getItem('vost.prefs.v1')!);
+    const saved = stored('prefs.v1');
     expect([saved.drawingMagnetStrength, saved.drawingsLocked, saved.drawingStayMode]).toEqual(['strong', true, true]);
     const back = await load(saved);
     expect([back.getState().drawingMagnetStrength, back.getState().drawingsLocked, back.getState().drawingStayMode]).toEqual(['strong', true, true]);
@@ -1596,10 +1761,157 @@ describe('replay', () => {
     expect([bad.getState().drawingMagnetStrength, bad.getState().drawingsLocked, bad.getState().drawingStayMode]).toEqual(['weak', false, false]);
   });
 
+  it('indicator defaults: persisted per built-in kind, bad entries load as nothing, a new indicator starts from one', async () => {
+    const load = async (prefs: Record<string, unknown>) => {
+      vi.resetModules();
+      seedRaw('prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, ...prefs }));
+      vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+      const st = track((await import('./store')).useStore);
+      st.getState().init();
+      return st;
+    };
+    const fresh = await load({});
+    expect(fresh.getState().indicatorDefaults).toEqual({});
+    fresh.getState().setIndicatorDefault('ema', { params: { length: 9999, bogus: 1 }, hideOn: ['minutes', 'nope' as never] });
+    fresh.getState().setIndicatorDefault('pine', { params: {}, hideOn: [] });
+    expect(fresh.getState().indicatorDefaults).toEqual({ ema: { params: { length: 2000 }, hideOn: ['minutes'] } });
+    fresh.getState().flushPersist();
+    expect(stored('prefs.v1').indicatorDefaults).toEqual({ ema: { params: { length: 2000 }, hideOn: ['minutes'] } });
+
+    const id = chartOf(fresh).getState().addIndicator('ema');
+    const spec = chartOf(fresh).getState().indicators.find((i) => i.id === id)!;
+    expect([spec.params, spec.hideOn]).toEqual([{ length: 2000 }, ['minutes']]);
+    const rsiId = chartOf(fresh).getState().addIndicator('rsi');
+    const rsi = chartOf(fresh).getState().indicators.find((i) => i.id === rsiId)!;
+    expect(rsi.hideOn).toBeUndefined();
+    fresh.getState().flushPersist(); // nothing pending that could write over the prefs the next load seeds
+
+    const again = await load({ indicatorDefaults: stored('prefs.v1').indicatorDefaults });
+    expect(again.getState().indicatorDefaults).toEqual({ ema: { params: { length: 2000 }, hideOn: ['minutes'] } });
+    again.getState().setIndicatorDefault('ema', null);
+    expect(again.getState().indicatorDefaults).toEqual({});
+    again.getState().flushPersist();
+    for (const bad of ['x', 5, [], null, { ghost: { params: {} }, ema: 'x', sma: [], rsi: { params: { length: 'a' }, hideOn: 'minutes' } }]) {
+      const d = (await load({ indicatorDefaults: bad })).getState().indicatorDefaults;
+      expect(Object.keys(d).filter((k) => k !== 'rsi'), JSON.stringify(bad)).toEqual([]);
+    }
+  });
+
+  it('indicators read from prefs: a bad hideOn is cleaned, a spec without one loads as before', async () => {
+    vi.resetModules();
+    const base = { color: '#111111', visible: true, params: { length: 5 } };
+    seedRaw('prefs.v1',
+      JSON.stringify({
+        providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100,
+        indicators: [{ id: 'a', kind: 'sma', ...base }, { id: 'b', kind: 'ema', ...base, hideOn: ['days', 'x', 3] }, { id: 'c', kind: 'rsi', ...base, hideOn: 'days' }],
+      }),
+    );
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+    const st = track((await import('./store')).useStore);
+    st.getState().init();
+    const ind = chartOf(st).getState().indicators;
+    expect(ind[0]).toEqual({ id: 'a', kind: 'sma', ...base });
+    expect(ind[1].hideOn).toEqual(['days']);
+    expect('hideOn' in ind[2]).toBe(false);
+  });
+
+  it('updateIndicator keeps hideOn and params; restoreIndicator puts the opening spec back', async () => {
+    vi.resetModules();
+    stubStorage();
+    const { useStore } = await import('./store');
+    track(useStore);
+    const c = chartOf(useStore).getState();
+    const id = c.addIndicator('ema');
+    const opening = chartOf(useStore).getState().indicators.find((i) => i.id === id)!;
+    c.updateIndicator(id, { hideOn: ['minutes', 'hours'], params: { length: 12 } });
+    const edited = chartOf(useStore).getState().indicators.find((i) => i.id === id)!;
+    expect([edited.hideOn, edited.params]).toEqual([['minutes', 'hours'], { length: 12 }]);
+    c.updateIndicator(id, { hideOn: [] });
+    expect('hideOn' in chartOf(useStore).getState().indicators.find((i) => i.id === id)!).toBe(false);
+    c.restoreIndicator(id, opening);
+    expect(chartOf(useStore).getState().indicators.find((i) => i.id === id)).toEqual(opening);
+  });
+
+  it('a style patch persists through prefs, Cancel puts the opening style back, and it never schedules a Pine run', async () => {
+    vi.resetModules();
+    stubStorage();
+    const { useStore } = await import('./store');
+    track(useStore);
+    const c = chartOf(useStore).getState();
+    const id = c.addIndicator('ema');
+    const find = () => chartOf(useStore).getState().indicators.find((i) => i.id === id)!;
+    const opening = find();
+    expect('style' in opening).toBe(false);
+    const style = { plots: { ema_EMA: { plotType: 'step' as const, color: '#ff0000' } }, precision: 2 };
+    c.updateIndicator(id, { style });
+    expect(find().style).toEqual(style);
+    useStore.getState().flushPersist();
+    const saved = stored('prefs.v1');
+    expect(saved.indicators.find((i: { id: string }) => i.id === id).style).toEqual(style);
+    vi.resetModules();
+    vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
+    const fresh = track((await import('./store')).useStore);
+    fresh.getState().init();
+    expect(chartOf(fresh).getState().indicators.find((i) => i.id === id)?.style).toEqual(style);
+    c.updateIndicator(id, { style: { precision: 2 } });
+    expect(find().style).toEqual({ precision: 2 });
+    c.updateIndicator(id, { style: {} });
+    expect('style' in find()).toBe(false);
+    c.updateIndicator(id, { style });
+    c.restoreIndicator(id, opening);
+    expect(find()).toEqual(opening);
+    expect('style' in find()).toBe(false);
+  });
+
+  it('a style patch on a Pine script does not rerun it', async () => {
+    vi.resetModules();
+    stubStorage();
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { candlesFromCsvText } = await import('../lib/csv');
+    const candles = candlesFromCsvText(readFileSync(fileURLToPath(new URL('../../../examples/sample-daily.csv', import.meta.url)), 'utf8')).candles;
+    const { useStore } = await import('./store');
+    track(useStore);
+    chartOf(useStore).setState({ candles });
+    const c = chartOf(useStore).getState();
+    const id = c.addIndicator('pine');
+    await vi.waitFor(() => { const r = chartOf(useStore).getState().pineRuns[id]; expect(r && !r.running && r.result).toBeTruthy(); }, { timeout: 20000 });
+    const before = chartOf(useStore).getState().pineRuns[id];
+    c.updateIndicator(id, { style: { plots: { '0_Fast': { visible: false } } } });
+    const after = chartOf(useStore).getState().pineRuns[id];
+    expect(after).toBe(before);
+    expect(after.running).toBe(false);
+  });
+
+  it('restoreIndicator removes Pine input overrides added since and reruns the script', async () => {
+    vi.resetModules();
+    stubStorage();
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { candlesFromCsvText } = await import('../lib/csv');
+    const candles = candlesFromCsvText(readFileSync(fileURLToPath(new URL('../../../examples/sample-daily.csv', import.meta.url)), 'utf8')).candles;
+    const { useStore } = await import('./store');
+    track(useStore);
+    chartOf(useStore).setState({ candles });
+    const c = chartOf(useStore).getState();
+    const id = c.addIndicator('pine');
+    const settled = () => vi.waitFor(() => { const r = chartOf(useStore).getState().pineRuns[id]; expect(r && !r.running && r.result).toBeTruthy(); }, { timeout: 20000 });
+    await settled();
+    const opening = chartOf(useStore).getState().indicators.find((i) => i.id === id)!;
+    c.updateIndicator(id, { inputs: { Fast: 3 }, calculation: { gaps: false } });
+    await vi.waitFor(() => expect(chartOf(useStore).getState().pineRuns[id].result?.plots[0].values[4]).not.toBeNull(), { timeout: 20000 });
+    await settled();
+    c.restoreIndicator(id, opening);
+    const back = chartOf(useStore).getState().indicators.find((i) => i.id === id)!;
+    expect(back.inputs).toEqual({});
+    expect(back.calculation).toBeUndefined();
+    await vi.waitFor(() => expect(chartOf(useStore).getState().pineRuns[id].result?.plots[0].values[4]).toBeNull(), { timeout: 20000 });
+  });
+
   it('drawing defaults: persisted per tool, bad or unknown entries load as nothing', async () => {
     const load = async (prefs: Record<string, unknown>) => {
       vi.resetModules();
-      localStorage.setItem('vost.prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, ...prefs }));
+      seedRaw('prefs.v1', JSON.stringify({ providerId: 'binance', symbol: 'BTCUSDT', timeframe: '1h', bars: 100, ...prefs }));
       vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
       const st = track((await import('./store')).useStore);
       st.getState().init();
@@ -1611,7 +1923,7 @@ describe('replay', () => {
     fresh.getState().setDrawingDefault('ghost', { width: 3 });
     expect(fresh.getState().drawingDefaults).toEqual({ trendLine: { width: 3, color: '#ff0000' } });
     fresh.getState().flushPersist();
-    expect(JSON.parse(localStorage.getItem('vost.prefs.v1')!).drawingDefaults).toEqual({ trendLine: { width: 3, color: '#ff0000' } });
+    expect(stored('prefs.v1').drawingDefaults).toEqual({ trendLine: { width: 3, color: '#ff0000' } });
 
     vi.resetModules();
     vi.stubGlobal('fetch', () => Promise.reject(new Error('offline')));
@@ -1645,6 +1957,8 @@ describe('two chart stores stay apart', () => {
       timeZone: () => 'UTC',
       buildTimeframes: () => false,
       historyLoading: () => 'all',
+      pineHigherBars: () => 'forming',
+      jobPlace: () => 'browser',
       datasets: () => [],
       addDataset: () => {},
       removeDataset: () => {},
@@ -1686,6 +2000,15 @@ describe('two chart stores stay apart', () => {
     createChartStore(id, { ...defaultChartInitial(), providerId: 'fake', symbol, timeframe: '1h', bars: 100 }, env);
 
   afterEach(() => vi.restoreAllMocks());
+
+  it('starts on a linear price scale; setPriceScaleMode sets it and reports one prefs change', () => {
+    const e = stubEnv();
+    const c = make('a', 'AAA', e.env);
+    expect(c.getState().priceScaleMode).toBe('linear');
+    c.getState().setPriceScaleMode('percent');
+    expect(c.getState().priceScaleMode).toBe('percent');
+    expect(e.prefsChanges()).toBe(1);
+  });
 
   it('loads different symbols into separate candles', async () => {
     const p = fakeProvider();
@@ -1859,7 +2182,7 @@ describe('runBacktest progress', () => {
     const candles = candlesFromCsvText(text).candles;
     const { useStore } = await import('./store');
     track(useStore);
-    chartOf(useStore).setState({ candles });
+    chartOf(useStore).setState({ candles, historyStart: true });
     return { useStore, candles };
   }
 
@@ -1945,7 +2268,7 @@ describe('Pine market context', () => {
     const candles = candlesFromCsvText(text).candles;
     const { useStore } = await import('./store');
     track(useStore);
-    chartOf(useStore).setState({ candles });
+    chartOf(useStore).setState({ candles, historyStart: true });
     const posts: Array<{ type: string; market?: unknown; config?: { market?: unknown } }> = [];
     class FakeWorker {
       onmessage: ((ev: { data: unknown }) => void) | null = null;
@@ -1965,9 +2288,6 @@ describe('Pine market context', () => {
     Object.fromEntries(posts.map((p) => [p.type, p.type === 'pine' ? p.market : p.config?.market]));
 
   it('the indicator run, backtest, input refresh and optimizer all carry the chart market, never saved', async () => {
-    const written: string[] = [];
-    const set = localStorage.setItem.bind(localStorage);
-    vi.stubGlobal('localStorage', { ...localStorage, getItem: localStorage.getItem.bind(localStorage), removeItem: localStorage.removeItem.bind(localStorage), setItem: (k: string, v: string) => { written.push(v); set(k, v); } });
     const { useStore, posts } = await boot();
     const st = () => chartOf(useStore).getState();
     st().setBtConfig({ strategyId: 'pine' });
@@ -1987,9 +2307,21 @@ describe('Pine market context', () => {
 
     expect(st().btConfig.market).toBeUndefined();
     useStore.getState().flushPersist();
-    expect(written.join('\n')).toContain('"strategyId":"pine"');
-    expect(written.join('\n')).not.toContain('market');
+    expect(allStoredRaw()).toContain('"strategyId":"pine"');
+    expect(allStoredRaw()).not.toContain('market');
     expect(marketsOf(posts).run).toEqual(expected);
+  });
+
+  it('carries higherBars finished only when the Pine setting is on', async () => {
+    const { useStore, posts } = await boot();
+    const st = () => chartOf(useStore).getState();
+    st().setBtConfig({ strategyId: 'pine' });
+    chartOf(useStore).setState({ providerId: 'yahoo', symbol: 'AAPL', timeframe: '2h' });
+    await st().refreshPineInputs();
+    expect((posts.filter((p) => p.type === 'pine').at(-1)!.market as Record<string, unknown>).higherBars).toBeUndefined();
+    useStore.setState({ pineHigherBars: 'finished' });
+    await st().refreshPineInputs();
+    expect(posts.filter((p) => p.type === 'pine').at(-1)!.market).toEqual({ providerId: 'yahoo', symbol: 'AAPL', interval: '2h', higherBars: 'finished' });
   });
 
   it('uses the shown dataset instead of the provider picker', async () => {

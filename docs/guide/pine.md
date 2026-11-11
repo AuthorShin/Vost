@@ -8,6 +8,12 @@ Press **Pine Editor** in the top bar (or **Edit** on a Pine indicator in the Ind
 
 ![The Pine pane](../evidence/pine-pane/pine-pane-editor-desktop.png)
 
+### Add to chart
+
+What you type is a draft: the chart, the inputs list and the messages stay as they were. Press **Add to chart** (or Ctrl+Enter, Cmd+Enter on a Mac) to put the edited script on the chart and run it. The button is enabled only while the draft differs from the script on the chart. An unapplied draft is kept with the indicator, so it survives closing the pane, switching indicators and reloading, and a saved layout keeps it. Errors always describe the last script you added, and update only when you add again. Backtests, the optimizer and Compare use the script on the chart, never an unapplied draft. Input controls apply at once, since they are not the editor. **Convert to v6** converts the draft and writes it back as a draft, so press Add to chart afterwards.
+
+![A draft that is not on the chart yet, with Add to chart enabled](../evidence/pine-pane/pine-pane-unapplied-desktop.png)
+
 ### Inputs
 
 Every input of the script gets a control that fits its type: a number field, a checkbox, a select (for `input.source`, which lists the eight price sources, and for inputs with options), a color picker with an opacity slider, a UTC date-time field for `input.time`, a timeframe select (Chart, then the chart's own intervals), text fields for symbols and sessions, and a multi-line field for `input.text_area`. A symbol field suggests symbols from the current provider but never changes the chart's symbol. Inputs sit in the script's own groups (the heading), side by side where it sets `inline`, and a script's `tooltip` shows on the label (hover the label or the i mark). The same controls are in the Backtest pane.
@@ -35,9 +41,21 @@ A script can also read another symbol, for example `request.security("BYBIT:ETHU
 
 ![A daily EMA plotted on an hourly chart steps once a day](../evidence/pine-security/pine-security-daily-ema-desktop.png)
 
-An indicator can also declare its own timeframe, as in TradingView: `indicator("Daily SMA", overlay=true, timeframe="D", timeframe_gaps=false)` runs the whole script on daily bars and shows its values on the chart's bars. Each daily value shows on the last chart bar of its day (the day still in progress shows its value so far, never its final close); with `timeframe_gaps=false` it holds until the next day's value, with the default `true` it shows only on that one bar. A timeframe lower than the chart's, a seconds timeframe or one the data source cannot give stops the script with a message naming both timeframes.
+An indicator can also declare its own timeframe, as in TradingView: `indicator("Daily SMA", overlay=true, timeframe="D", timeframe_gaps=false)` runs the whole script on daily bars and shows its values on the chart's bars. Each daily value shows on the last chart bar of its day (the day still in progress shows its value so far, never its final close; see [Repainting](#repainting)); with `timeframe_gaps=false` it holds until the next day's value, with the default `true` it shows only on that one bar. A script that names `timeframe` in its `indicator(...)` call (even `timeframe=""`) shows a Calculation section in the Pine pane, after its own inputs, as in TradingView: a Timeframe list (Chart, or any interval in the chart's list) and a "Wait for timeframe closes" checkbox (the script's `timeframe_gaps`). Changing either re-runs the indicator on that timeframe and the choice is saved with the chart; a script without the argument has no such section. A timeframe lower than the chart's runs the script on the lower bars and each chart bar shows the last value inside it. The lower bars loaded are the newest 20000 at most, so on a long chart the oldest chart bars show no value. A chart of an imported file cannot give lower bars, and a seconds timeframe or one the data source cannot give stops the script with a message naming both timeframes and where the timeframe came from (the script or the Calculation setting).
 
 ![A daily SMA from a declared timeframe steps once a day on an hourly chart](../evidence/pine-security/pine-security-declared-timeframe-desktop.png)
+
+![The Calculation section set to the daily timeframe, not waiting for closes](../evidence/pine-security/pine-security-calculation-higher-desktop.png)
+
+![The Calculation section set to 15m: each hourly bar shows the last 15m value inside it](../evidence/pine-security/pine-security-calculation-lower-desktop.png)
+
+## Repainting
+
+A script repaints when a value it showed on the live bar changes by the time the bar has closed. Most of what a script reads never does: built-ins, `ta.*` series, `var` state, crossovers and strategy trades give a closed bar the same value live as after a reload. `request.security` with the default `lookahead_off` does not repaint either: the live bar holds the last finished higher bar. What does repaint is an indicator that declares a higher timeframe (`indicator(timeframe="D")`): as in TradingView, its live bar follows the higher bar still forming, and the value is replaced when that bar closes.
+
+Settings has a **Pine scripts** section ([Getting started](getting-started.md#the-settings-popup)) with **Higher timeframes on the live bar**: **Follow the forming bar (as TradingView)** is the default, and **Only finished bars (no repaint)** makes such a script run only on finished higher bars, so its live values always match a reload. The choice is saved, applies at once to every Pine indicator on every open chart, and reaches backtests and the optimizer from their next run (a result already shown is not re-run).
+
+Either choice leaves the repaints a script makes itself: `request.security` with `lookahead_on` and no `[1]`, negative offsets, and logic on `barstate.isrealtime`.
 
 Two limits: the time zone is always UTC (right for crypto, not for Yahoo stocks), and the tick size is estimated from the prices on the chart, not taken from the exchange.
 
@@ -106,6 +124,14 @@ A script with no `//@version` line, or a version below 5, will not run. The pane
 A script can `import user/name/version as x` a TradingView library. The server looks the library up (open-source ones only), keeps a copy and serves it to every tab. If it cannot be fetched, the run fails with a message naming it and a **Paste library** button. **Libraries** in the pane head lets you paste a library's source once (give the path as `user/name/version`) and remove stored ones.
 
 ![The Pine libraries dialog](../evidence/pine-libraries/pine-libraries-dialog-desktop.png)
+
+## TradingView indicators
+
+**TradingView indicators** in the pane head lets you add an open-source indicator from TradingView. Search by name, or paste a `https://www.tradingview.com/script/...` link, and press **Add**: the server fetches the script and keeps a copy with its author and licence (your browser never contacts TradingView). The list shows each one's author, the first line of its licence and when it was added; **Open in editor** puts it on the chart and in the Pine editor, and **Remove** drops the copy. A closed-source script, a strategy or a library is refused with the reason. TradingView's endpoints are unofficial, so they may change.
+
+![Searching TradingView for Supertrend and adding it](../evidence/pine-indicators/pine-indicators-added-desktop.png)
+
+![A closed-source script is refused with a clear reason](../evidence/pine-indicators/pine-indicators-closed-source-desktop.png)
 
 ## Compare
 

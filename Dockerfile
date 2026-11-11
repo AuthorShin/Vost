@@ -8,7 +8,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# Build the web client (typecheck + vite build -> client/dist).
+# Build the web client (typecheck + vite build -> client/dist) and the server engine bundle (-> server/dist/engine.mjs).
 COPY client ./client
 COPY shared ./shared
 COPY server ./server
@@ -31,8 +31,9 @@ COPY package.json ./package.json
 COPY server ./server
 COPY shared ./shared
 COPY --from=build /app/client/dist ./client/dist
+COPY --from=build /app/server/dist ./server/dist
 
-# The one piece of state: alerts.json. Owned by the unprivileged user.
+# The state: the data folder (alerts, settings, Pine libraries, candle store). Owned by the unprivileged user.
 RUN mkdir -p /data && chown node:node /data
 VOLUME /data
 

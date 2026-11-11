@@ -13,12 +13,23 @@
  *    the running peak.
  */
 import type { Candle } from '../../types';
+import { atr } from '../indicators';
+import { higherOfMultiple } from './higherTimeframe';
+import { hitTest, levelsAtEntry, plotEntryAt, readExitSettings, refreshPlotLevels, updateTrail, type PlotLevels, type TradeLevels } from './exits';
 import type { BacktestConfig, EquityPoint, ExitReason, Signal, Trade } from './types';
 
 export interface EngineOutput {
   trades: Trade[];
   equity: EquityPoint[];
   exposureBars: number;
+  /**
+   * Entry signals that fired. A signal fires on executed bar `i` when `signals[i - 1]` is not null,
+   * its side is non-zero after the shorts filter (-1 counts as 0 without `allowShort`), and that side
+   * differs from the side of the last non-null signal before it (starting at 0). Null signals neither
+   * fire nor reset the side. The last bar's signal is never executed, so it is not counted. Counted
+   * before the `requireReset` rule, so a held-back signal still counts. Always >= trades.length.
+   */
+  signalsFired: number;
 }
 
 interface OpenPosition {
@@ -29,6 +40,8 @@ interface OpenPosition {
   entryBar: number;
   entryFee: number;
   entryNotional: number;
+  leverage?: number;
+  levels: TradeLevels;
 }
 
 function coerceSignal(v: unknown): Signal {
@@ -46,19 +59,30 @@ export function runBacktest(
   config: BacktestConfig,
   /** Fraction of bars simulated (0..1), about 100 calls per run, the last one at 1. */
   onProgress?: (pct: number) => void,
+  /** TradingView indicator stop and target levels (Composed roles), aligned to the candles. Absent = today's exits only. */
+  plotLevels?: PlotLevels,
 ): EngineOutput {
   const n = candles.length;
   const trades: Trade[] = [];
   const equity: EquityPoint[] = [];
-  if (n < 2) return { trades, equity, exposureBars: 0 };
+  if (n < 2) return { trades, equity, exposureBars: 0, signalsFired: 0 };
 
   const signals: Signal[] = rawSignals.map(coerceSignal);
 
   const feeRate = Math.max(0, config.feeBps) / 10000;
   const slip = Math.max(0, config.slippageBps) / 10000;
   const sizePct = Math.min(100, Math.max(1, config.positionSizePct)) / 100;
-  const stopPct = config.stopLossPct != null && config.stopLossPct > 0 ? config.stopLossPct : null;
-  const tpPct = config.takeProfitPct != null && config.takeProfitPct > 0 ? config.takeProfitPct : null;
+  const exits = readExitSettings(config);
+  const atrHtf = exits.needsAtr && exits.atrTimeframe > 1 ? higherOfMultiple(candles, exits.atrTimeframe) : null;
+  const atrSeries = exits.needsAtr ? atr(atrHtf ? atrHtf.bars : candles, exits.atrLength) : null;
+  /** The ATR of the signal bar: on the loaded bars, or of the newest longer bar closed at the signal bar's close. */
+  const atrAt = (signalBar: number): number | null => {
+    if (!atrSeries || signalBar < 0) return null;
+    if (!atrHtf) return atrSeries[signalBar];
+    const j = atrHtf.lastClosed[signalBar];
+    return j < 0 ? null : atrSeries[j];
+  };
+  const riskFrac = config.riskPct != null && Number.isFinite(config.riskPct) && config.riskPct > 0 ? Math.min(100, config.riskPct) / 100 : null;
 
   let cash = config.initialCapital; // realised equity
   let position: OpenPosition | null = null;
@@ -96,12 +120,21 @@ export function runBacktest(
       fees: pos.entryFee + exitFee,
       bars: barIndex - pos.entryBar,
       exitReason: reason,
+      ...(pos.leverage != null ? { leverage: pos.leverage } : {}),
     });
   };
 
-  const openPosition = (side: -1 | 1, rawPrice: number, barIndex: number): OpenPosition => {
+  const openPosition = (side: -1 | 1, rawPrice: number, barIndex: number): OpenPosition | null => {
     const fill = side === 1 ? fillBuy(rawPrice) : fillSell(rawPrice);
-    const notional = Math.max(0, cash) * sizePct;
+    // Levels come from the entry fill and the ATR of the signal bar; during ATR warm-up no trade opens.
+    // An indicator stop with no usable level on the signal bar opens no trade either.
+    const plotEntry = plotLevels && (plotLevels.stop || plotLevels.target) ? plotEntryAt(plotLevels, side, fill, barIndex) : undefined;
+    const levels = levelsAtEntry(exits, side, fill, atrAt(barIndex - 1), plotEntry);
+    if (!levels) return null;
+    const stopFrac = levels.stopFrac;
+    const equityNow = Math.max(0, cash);
+    // Risk sizing needs a stop distance; without one it falls back to a percent of equity.
+    const notional = riskFrac != null && stopFrac != null ? (equityNow * riskFrac) / stopFrac : equityNow * sizePct;
     const qty = fill > 0 ? notional / fill : 0;
     const entryFee = qty * fill * feeRate;
     totalFees += entryFee;
@@ -114,6 +147,8 @@ export function runBacktest(
       entryBar: barIndex,
       entryFee,
       entryNotional: notional,
+      levels,
+      leverage: riskFrac != null && stopFrac != null && equityNow > 0 ? notional / equityNow : undefined,
     };
   };
 
@@ -124,6 +159,8 @@ export function runBacktest(
     position: 0,
   });
 
+  let signalsFired = 0;
+  let lastSignalSide: Signal = 0;
   const reportEvery = Math.max(1, Math.floor(n / 100));
   for (let i = 1; i < n; i++) {
     const bar = candles[i];
@@ -131,6 +168,9 @@ export function runBacktest(
     // ---- 1. Execute the target decided on the previous close -------------
     let target = signals[i - 1];
     if (target != null) {
+      const filtered = target === -1 && !config.allowShort ? 0 : target;
+      if (filtered !== 0 && filtered !== lastSignalSide) signalsFired++;
+      lastSignalSide = filtered;
       if (requireReset != null) {
         if (target === requireReset) {
           target = 0; // still pointing at the side we were stopped out of
@@ -147,7 +187,7 @@ export function runBacktest(
           position = null;
         }
         if (target !== 0 && cash > 0) {
-          position = openPosition(target, bar.open, i);
+          position = openPosition(target, bar.open, i); // null while an ATR exit has no ATR yet
         }
       }
     }
@@ -155,34 +195,15 @@ export function runBacktest(
     // ---- 2. Intra-bar stop loss / take profit ----------------------------
     if (position) {
       const pos = position;
-      const stopPrice = stopPct != null ? pos.entryPrice * (1 - (pos.side === 1 ? stopPct : -stopPct) / 100) : null;
-      const tpPrice = tpPct != null ? pos.entryPrice * (1 + (pos.side === 1 ? tpPct : -tpPct) / 100) : null;
+      if (plotLevels && pos.entryBar !== i) refreshPlotLevels(pos.side, pos.levels, plotLevels, i, candles[i - 1].close);
+      const hit = hitTest(pos.side, pos.levels, bar);
 
-      let exitPrice: number | null = null;
-      let reason: ExitReason | null = null;
-
-      if (pos.side === 1) {
-        if (stopPrice != null && bar.low <= stopPrice) {
-          exitPrice = bar.open <= stopPrice ? bar.open : stopPrice; // gap-through fills at open
-          reason = 'stop_loss';
-        } else if (tpPrice != null && bar.high >= tpPrice) {
-          exitPrice = bar.open >= tpPrice ? bar.open : tpPrice;
-          reason = 'take_profit';
-        }
-      } else {
-        if (stopPrice != null && bar.high >= stopPrice) {
-          exitPrice = bar.open >= stopPrice ? bar.open : stopPrice;
-          reason = 'stop_loss';
-        } else if (tpPrice != null && bar.low <= tpPrice) {
-          exitPrice = bar.open <= tpPrice ? bar.open : tpPrice;
-          reason = 'take_profit';
-        }
-      }
-
-      if (exitPrice != null && reason != null) {
-        closePosition(pos, exitPrice, i, reason);
+      if (hit) {
+        closePosition(pos, hit.price, i, hit.reason);
         position = null;
         requireReset = pos.side;
+      } else {
+        updateTrail(pos.side, pos.levels, bar);
       }
     }
 
@@ -213,7 +234,7 @@ export function runBacktest(
     last.position = 0;
   }
 
-  return { trades, equity, exposureBars };
+  return { trades, equity, exposureBars, signalsFired };
 }
 
 export { coerceSignal };

@@ -6,11 +6,14 @@ import type { Candle } from '../../shared/market.ts';
 import { PROVIDER_CATALOG } from '../../shared/providerCatalog.ts';
 import { liveFeed } from '../../server/live/feeds.ts';
 import { openUpstream, type UpstreamSocket } from '../../server/live/socket.ts';
+import { createApiDeps } from '../../server/api.ts';
 import { adapters } from '../../server/providers/index.ts';
 import { createSymbolCache } from '../../server/providers/symbolCache.ts';
 import { setTestUpstream } from '../../server/testUpstream.ts';
+import { createIndicators } from '../../server/pine/indicators.ts';
 import { createLibraries } from '../../server/pine/libraries.ts';
 import { startFakeUpstream, type FakeUpstream } from './index.ts';
+import { CLOSED_INDICATOR_ID, OPEN_INDICATOR_ID, OPEN_INDICATOR_SHORT_ID, OPEN_INDICATOR_SOURCE, STRATEGY_ID, STRATEGY_SHORT_ID } from './pine-indicators.ts';
 import { CLOSED_LIB_PATH, NESTED_LIB_PATH, NESTED_LIB_SOURCE, OPEN_LIB_PATH, OPEN_LIB_SOURCE } from './pine-libraries.ts';
 
 let fake: FakeUpstream;
@@ -74,6 +77,42 @@ describe('fake upstream REST, through the real adapters and the real fetch', () 
     const res = await fetch(`${fake.url}/https/data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=5`);
     expect(res.status).toBe(200);
     expect(((await res.json()) as unknown[]).length).toBe(5);
+  });
+
+  it('yahoo has no chart for ^STOXX50E (a skipped market in the market search), and one for its neighbours', async () => {
+    const chart = (symbol: string) => fetch(`${fake.url}/https/query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&period1=0&period2=9999999999`);
+    const gone = await chart('^STOXX50E');
+    expect(gone.status).toBe(404);
+    expect(JSON.stringify(await gone.json())).toContain('No data found');
+    expect((await chart('^FCHI')).status).toBe(200);
+  });
+
+  it('answers the market lists: CoinGecko in both orders, CoinMarketCap only with its key', async () => {
+    const cg = (order: string) => fetch(`${fake.url}/https/api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=${order}&per_page=100&page=1`).then((r) => r.json() as Promise<Array<{ symbol: string }>>);
+    const cap = await cg('market_cap_desc');
+    const vol = await cg('volume_desc');
+    expect(cap[0].symbol).toBe('btc');
+    expect(vol.map((c) => c.symbol)).toEqual(cap.map((c) => c.symbol).reverse());
+    const cmc = `${fake.url}/https/pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest?limit=100&sort=market_cap`;
+    expect((await fetch(cmc)).status).toBe(401);
+    const ok = await fetch(cmc, { headers: { 'X-CMC_PRO_API_KEY': 'k' } });
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { data: Array<{ symbol: string }> }).data[0].symbol).toBe('BTC');
+  });
+
+  it('the server market lists come back through the real fetch, offline', async () => {
+    const before = fake.requests.length;
+    const deps = createApiDeps();
+    const lists = await deps.marketLists.get({ symbols: deps.symbols });
+    expect(lists.map((l) => l.id)).toEqual(['crypto-cap', 'crypto-volume', 'stocks-cap', 'stocks-volume', 'indices']);
+    expect(lists[0].entries.map((e) => e.symbol)).toEqual(['BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'BNBUSDT', 'SOLUSDT', 'DOGEUSDT']);
+    expect(lists[0].excluded.map((e) => e.symbol)).toEqual(['USDT']);
+    expect(lists[0].skipped.map((e) => e.symbol)).toEqual(['NOPE']);
+    expect(lists[0].error).toBeUndefined();
+    expect(new Set(fake.requests.slice(before).map((r) => r.host))).toEqual(new Set(['api.coingecko.com', 'api.binance.com']));
+    const keyed = createApiDeps();
+    const withKey = await keyed.marketLists.get({ symbols: keyed.symbols, coinMarketCapKey: 'k' });
+    expect(withKey[0].source).toMatch(/CoinMarketCap/);
   });
 
   it('answers 404 for a host it does not know', async () => {
@@ -220,6 +259,33 @@ describe('fake upstream TradingView library endpoints, through the real Librarie
 
   it('search without type=3 finds no library', async () => {
     const res = await fetch(`${fake.url}/https/www.tradingview.com/pubscripts-suggest-json/?search=OpenLib`);
+    expect(((await res.json()) as { results: unknown[] }).results).toEqual([]);
+  });
+});
+
+describe('fake upstream TradingView indicator endpoints, through the real Indicators store', () => {
+  it('searches open studies only, adds by id and by link (the script object id, not an earlier PUB id), and refuses closed and strategy scripts', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'vost-fake-tv-ind-'));
+    try {
+      const ind = createIndicators({ dir, log: () => undefined });
+      await ind.load();
+      const hits = await ind.search('supertrend');
+      expect(hits.map((h) => h.scriptId)).toEqual([OPEN_INDICATOR_ID]);
+      expect(hits[0]).toMatchObject({ name: 'Supertrend', author: 'alice', shortId: OPEN_INDICATOR_SHORT_ID });
+      expect(await ind.add({ scriptId: OPEN_INDICATOR_ID })).toMatchObject({ name: 'Supertrend', author: 'alice' });
+      expect(ind.get(OPEN_INDICATOR_ID)?.source).toBe(OPEN_INDICATOR_SOURCE);
+      await ind.remove(OPEN_INDICATOR_ID);
+      expect(await ind.add({ link: `https://www.tradingview.com/script/${OPEN_INDICATOR_SHORT_ID}/` })).toMatchObject({ scriptId: OPEN_INDICATOR_ID });
+      await expect(ind.add({ scriptId: CLOSED_INDICATOR_ID })).rejects.toMatchObject({ reason: 'closed-source' });
+      await expect(ind.add({ scriptId: STRATEGY_ID })).rejects.toMatchObject({ name: 'InputError' });
+      await expect(ind.add({ link: `https://www.tradingview.com/script/${STRATEGY_SHORT_ID}/` })).rejects.toMatchObject({ name: 'InputError' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the library search with type=3 does not list indicators', async () => {
+    const res = await fetch(`${fake.url}/https/www.tradingview.com/pubscripts-suggest-json/?search=Supertrend&type=3`);
     expect(((await res.json()) as { results: unknown[] }).results).toEqual([]);
   });
 });

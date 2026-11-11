@@ -14,7 +14,7 @@ Some providers lack timeframes that others have. Vost offers them anyway, built 
 
 ## The Build setting
 
-The **Build** switch next to the picker (in the **More** menu on narrower screens) is off by default and remembered. With it on, every timeframe above the provider's lowest is built from the next lower native one instead of using the exchange's own bars, for history and for live. Built stock daily bars can differ slightly from the exchange's official ones, and OKX's own daily bars use UTC+8 days while built ones use UTC.
+The **Build** switch in the **Chart data** pop-up (the database icon in the top bar) is off by default and remembered. With it on, every timeframe above the provider's lowest is built from the next lower native one instead of using the exchange's own bars, for history and for live. Built stock daily bars can differ slightly from the exchange's official ones, and OKX's own daily bars use UTC+8 days while built ones use UTC.
 
 ![The Build setting on](../evidence/built-timeframe/built-timeframe-setting-on-desktop.png)
 
@@ -22,7 +22,7 @@ The **Build** switch next to the picker (in the **More** menu on narrower screen
 
 Pick **Add interval...** at the end of the picker. Enter a number and a unit (minutes, hours, days, weeks or months, for example `2h`, `10m`, `3d`, `2w` or `3M`). The dialog previews what the interval is built from and refuses one that is outside the limits, already listed, or that the provider cannot serve or build.
 
-Up to 20 custom intervals are kept. They are listed in the picker by bar length and marked `*`, and are hidden (not removed) on a provider that cannot serve them. Remove one from the picker and every chart on it moves to the provider's default timeframe. The Demo provider generates any interval. Custom intervals are saved in your browser.
+Up to 20 custom intervals are kept. They are listed in the picker by bar length and marked `*`, and are hidden (not removed) on a provider that cannot serve them. Remove one from the picker and every chart on it moves to the provider's default timeframe. The Demo provider generates any interval. Custom intervals are saved on the server.
 
 ![Adding a custom interval](../evidence/custom-timeframe/custom-timeframe-added-desktop.png)
 

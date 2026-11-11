@@ -1,6 +1,7 @@
 import { rowsToCsv, sanitizeFileName } from '../export';
 import { METRIC_LABELS, type MetricKey, type OptimizeRow, type SweepParam } from './optimizer';
 import type { MonteCarloValidationSettings } from './optimizerMonteCarlo';
+import type { ExitContext } from './exits';
 import type { Metrics } from './types';
 import type { RobustnessSettings, Span, SplitSettings, ValidationOutput } from './validation';
 import type { WalkForwardOutput, WalkForwardSettings } from './walkForward';
@@ -22,10 +23,14 @@ export interface OptimizeRunContext {
   bars: number;
   initialCapital: number;
   positionSizePct: number;
+  /** Risk sizing (percent of equity lost at the stop); replaces the position size line when set. */
+  riskPct?: number;
   feeBps: number;
   slippageBps: number;
   stopLossPct: number | null;
   takeProfitPct: number | null;
+  /** The ATR, R and trailing exits the run used (absent when it used only percent exits). */
+  exits?: ExitContext;
   allowShort: boolean;
   sweeps: SweepParam[];
   /** The validation the run used (absent with none). */
@@ -55,9 +60,13 @@ const METRIC_FIELDS: Record<keyof Metrics, true> = {
   calmar: true,
   maxDrawdownPct: true,
   maxDrawdownBars: true,
+  maxDrawdownSeconds: true,
   exposurePct: true,
   buyHoldPct: true,
   trades: true,
+  signalsFired: true,
+  signalsPer100Bars: true,
+  signalsPerDay: true,
   winRatePct: true,
   profitFactor: true,
   expectancy: true,
@@ -92,11 +101,20 @@ export function optimizeContextLines(c: OptimizeRunContext, result: OptimizeResu
     `range to: ${iso(c.rangeTo)}`,
     `bars: ${c.bars}`,
     `initial capital: ${c.initialCapital}`,
-    `position size %: ${c.positionSizePct}`,
+    c.riskPct != null ? `risk per trade %: ${c.riskPct}` : `position size %: ${c.positionSizePct}`,
     `fee bps: ${c.feeBps}`,
     `slippage bps: ${c.slippageBps}`,
     `stop loss %: ${off(c.stopLossPct)}`,
     `take profit %: ${off(c.takeProfitPct)}`,
+    ...(c.exits
+      ? [
+          ...(c.exits.stopLoss ? [`stop loss mode: ${c.exits.stopLoss}`] : []),
+          ...(c.exits.takeProfit ? [`take profit mode: ${c.exits.takeProfit}`] : []),
+          ...(c.exits.trailingStop ? [`trailing stop: ${c.exits.trailingStop}`] : []),
+          ...(c.exits.atrLength != null ? [`ATR length: ${c.exits.atrLength}`] : []),
+          ...(c.exits.atrTimeframe != null ? [`ATR timeframe: ${c.exits.atrTimeframe}x the chart`] : []),
+        ]
+      : []),
     `shorts: ${c.allowShort ? 'yes' : 'no'}`,
     `rank metric: ${result.metric} (${METRIC_LABELS[result.metric]})`,
     `sweeps: ${sweeps}`,

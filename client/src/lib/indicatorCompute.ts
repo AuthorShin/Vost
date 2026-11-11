@@ -4,7 +4,9 @@
 import type { Series } from '../types';
 import { bollinger, ema, macd, rsi, sma, vwap, type MacdResult } from './indicators';
 import type { Candle } from '../types';
-import type { PineInputValue } from './pine/types';
+import type { PineCalculation, PineInputValue } from './pine/types';
+import type { TimeframeKind } from './drawingStyle';
+import type { IndicatorStyle } from './plotStyle';
 
 export type IndicatorKind = 'sma' | 'ema' | 'bb' | 'vwap' | 'volume' | 'rsi' | 'macd' | 'pine';
 
@@ -119,18 +121,35 @@ export interface IndicatorSpec {
   visible: boolean;
   /** kind 'pine' only: the Pine Script source. */
   source?: string;
+  /** kind 'pine' only: unapplied editor text, present only while it differs from `source`. */
+  draft?: string;
   /** kind 'pine' only: input overrides keyed by input title. */
   inputs?: Record<string, PineInputValue>;
+  /** Pine only: the user's Calculation overrides (timeframe, wait for timeframe closes). Absent = the script's own values. */
+  calculation?: PineCalculation;
+  /** The timeframe kinds this indicator is hidden on. Absent or empty = drawn on every kind. */
+  hideOn?: TimeframeKind[];
+  /** The Style tab's settings. Absent = every plot drawn as it always was. */
+  style?: IndicatorStyle;
 }
 
 let indicatorCounter = 0;
 
-export function defaultIndicator(kind: IndicatorKind): IndicatorSpec {
+/** A saved default for a new indicator of a kind: its params and the timeframe kinds it is hidden on. */
+export interface IndicatorDefault {
+  params: Record<string, number>;
+  hideOn: TimeframeKind[];
+  style?: IndicatorStyle;
+}
+
+export function defaultIndicator(kind: IndicatorKind, saved?: IndicatorDefault | null): IndicatorSpec {
   const meta = INDICATOR_META[kind];
   return {
     id: `ind_${Date.now().toString(36)}_${(indicatorCounter++).toString(36)}`,
     kind,
-    params: Object.fromEntries(meta.params.map((p) => [p.key, p.default])),
+    params: { ...Object.fromEntries(meta.params.map((p) => [p.key, p.default])), ...(saved?.params ?? {}) },
+    ...(saved && saved.hideOn.length > 0 && { hideOn: [...saved.hideOn] }),
+    ...(saved?.style && { style: structuredClone(saved.style) }),
     color: PALETTE[indicatorCounter % PALETTE.length],
     visible: true,
     ...(kind === 'pine' && { source: DEFAULT_PINE_SOURCE, inputs: {} }),

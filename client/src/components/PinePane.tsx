@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { useDialogKeys } from '../lib/useDialogKeys';
 import { detectPineVersion } from '../lib/pine/version';
+import { declaresTimeframe } from '../lib/pine/declaredTimeframe';
 import { pineIndicatorName } from '../lib/pine/title';
 import { resolvePineSelection } from '../lib/pineSelection';
 import { fmtTime } from '../lib/format';
-import type { PineInputValue, PineMessages } from '../lib/pine/types';
+import type { PineCalculation, PineInputValue, PineMessages } from '../lib/pine/types';
 import { useStore } from '../state/store';
 import { type PineRunState } from '../state/chart';
 import { PineConvert } from './PineConvert';
 import { PineEditor } from './PineEditor';
-import { PineInputList } from './PineInputControl';
+import { PineCalculationSection, PineInputList } from './PineInputControl';
+import { PineIndicators } from './PineIndicators';
 import { PineLibraries } from './PineLibraries';
 import { useChart } from '../state/chartContext';
 
@@ -22,11 +24,14 @@ export function PinePane({ dialog, onClose }: { dialog: boolean; onClose: () => 
   const selectedPineId = useChart((s) => s.selectedPineId);
   const pineRuns = useChart((s) => s.pineRuns);
   const updateIndicator = useChart((s) => s.updateIndicator);
+  const setPineDraft = useChart((s) => s.setPineDraft);
+  const applyPineDraft = useChart((s) => s.applyPineDraft);
   const addIndicator = useChart((s) => s.addIndicator);
   const openPineEditor = useStore((s) => s.openPineEditor);
   const rootRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const [libraries, setLibraries] = useState<{ path: string } | null>(null);
+  const [tvIndicators, setTvIndicators] = useState(false);
 
   useEffect(() => {
     if (dialog) closeRef.current?.focus();
@@ -67,6 +72,9 @@ export function PinePane({ dialog, onClose }: { dialog: boolean; onClose: () => 
         <button className="ghost pine-libs-button" onClick={() => setLibraries({ path: '' })} title="Libraries that scripts import">
           Libraries
         </button>
+        <button className="ghost pine-libs-button" onClick={() => setTvIndicators(true)} title="Open-source indicators from TradingView">
+          TradingView indicators
+        </button>
         <span className="pine-pane-spacer" />
         <button ref={closeRef} className="ghost icon" aria-label="Close Pine editor" title="Close (Esc)" onClick={onClose}>
           ✕
@@ -75,11 +83,15 @@ export function PinePane({ dialog, onClose }: { dialog: boolean; onClose: () => 
       {active ? (
         <PineEntry
           key={active.id}
-          source={active.source ?? ''}
+          source={active.draft ?? active.source ?? ''}
+          hasDraft={active.draft !== undefined}
           overrides={active.inputs ?? {}}
+          calculation={active.calculation}
           run={pineRuns[active.id]}
-          onSource={(source) => updateIndicator(active.id, { source })}
+          onSource={(text) => setPineDraft(active.id, text)}
+          onApply={() => applyPineDraft(active.id)}
           onInput={(name, v) => updateIndicator(active.id, { inputs: { [name]: v } })}
+          onCalculation={(patch) => updateIndicator(active.id, { calculation: patch })}
           onPasteLibrary={(path) => setLibraries({ path })}
         />
       ) : (
@@ -90,6 +102,7 @@ export function PinePane({ dialog, onClose }: { dialog: boolean; onClose: () => 
           </button>
         </div>
       )}
+      {tvIndicators && <PineIndicators onClose={() => setTvIndicators(false)} />}
       {libraries && <PineLibraries initialPath={libraries.path} onClose={() => setLibraries(null)} />}
     </section>
   );
@@ -97,17 +110,25 @@ export function PinePane({ dialog, onClose }: { dialog: boolean; onClose: () => 
 
 function PineEntry({
   source,
+  hasDraft,
   overrides,
+  calculation,
   run,
   onSource,
+  onApply,
   onInput,
+  onCalculation,
   onPasteLibrary,
 }: {
   source: string;
+  hasDraft: boolean;
   overrides: Record<string, PineInputValue>;
+  calculation: PineCalculation | undefined;
   run: PineRunState | undefined;
   onSource: (source: string) => void;
+  onApply: () => void;
   onInput: (name: string, v: PineInputValue) => void;
+  onCalculation: (patch: PineCalculation) => void;
   onPasteLibrary: (path: string) => void;
 }) {
   const [cursor, setCursor] = useState({ line: 1, col: 1 });
@@ -117,9 +138,14 @@ function PineEntry({
   return (
     <div className="pine-entry">
       <div className="pine-entry-editor">
-        <PineEditor value={source} onChange={onSource} error={error} ariaLabel="Pine source" minHeight={60} onCursor={(line, col) => setCursor({ line, col })} />
+        <PineEditor value={source} onChange={onSource} error={error} ariaLabel="Pine source" minHeight={60} onCursor={(line, col) => setCursor({ line, col })} onSubmit={onApply} />
       </div>
-      {run?.running && <div className="muted-2" style={{ fontSize: 11.5 }}>Running…</div>}
+      <div className="pine-entry-actions">
+        <button className="primary" disabled={!hasDraft} title={hasDraft ? 'Add the edited script to the chart (Ctrl+Enter)' : 'No changes to add to the chart'} onClick={onApply}>
+          Add to chart
+        </button>
+        {run?.running && <span className="muted-2" style={{ fontSize: 11.5 }}>Running…</span>}
+      </div>
       <PineConvert source={source} error={error} onChange={onSource} />
       {error?.library && (
         <div className="pine-error-actions">
@@ -133,6 +159,14 @@ function PineEntry({
           inputs={inputs}
           valueOf={(inp) => overrides[inp.name] ?? inp.defval}
           onChange={(inp, v) => onInput(inp.name, v)}
+        />
+      )}
+      {declaresTimeframe(source) && (
+        <PineCalculationSection
+          timeframe={calculation?.timeframe ?? run?.result?.calculation?.timeframe ?? ''}
+          gaps={calculation?.gaps ?? run?.result?.calculation?.gaps ?? true}
+          onTimeframe={(timeframe) => onCalculation({ timeframe })}
+          onGaps={(gaps) => onCalculation({ gaps })}
         />
       )}
       {!error && run?.result?.messages && <PineMessagesView messages={run.result.messages} />}

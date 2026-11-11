@@ -6,7 +6,7 @@ import type { SplitSettings } from './validation';
 
 const sample: Metrics = {
   initialCapital: 10000, finalEquity: 11234.5678, totalReturnPct: 12.345678, cagrPct: null, sharpe: 1.23456789, sortino: Number.NaN,
-  calmar: 0.5, maxDrawdownPct: -8.123456, maxDrawdownBars: 40, exposurePct: 55.5, buyHoldPct: 3.3, trades: 12, winRatePct: 50,
+  calmar: 0.5, maxDrawdownPct: -8.123456, maxDrawdownBars: 40, maxDrawdownSeconds: 144000, exposurePct: 55.5, buyHoldPct: 3.3, trades: 12, signalsFired: 20, signalsPer100Bars: 4.5, signalsPerDay: 0.75, winRatePct: 50,
   profitFactor: Number.POSITIVE_INFINITY, expectancy: 12.5, avgTradePct: Number.NEGATIVE_INFINITY, bestTradePct: 9, worstTradePct: -4,
   avgBarsInTrade: 6, totalFees: 33.3, barsPerYear: 365,
 };
@@ -112,6 +112,22 @@ describe('optimizeResultToCsv', () => {
 
   it('sanitises the file name', () => {
     expect(optimizerCsvFileName(ctx)).toBe('vost_optimizer_BTC_USD_1h.csv');
+  });
+});
+
+describe('optimizeContextLines with volatility exits', () => {
+  it('names the ATR, R and trailing modes and the ATR length, and none for percent exits only', () => {
+    const plain = optimizeContextLines(ctx, result);
+    expect(plain.some((l) => /mode|trailing|ATR/.test(l))).toBe(false);
+    const lines = optimizeContextLines({ ...ctx, exits: { stopLoss: '2 x ATR', takeProfit: '3 x stop', trailingStop: '1.5 x ATR', atrLength: 20 } }, result);
+    const at = lines.indexOf('# take profit %: 5');
+    expect(lines.slice(at + 1, at + 5)).toEqual(['# stop loss mode: 2 x ATR', '# take profit mode: 3 x stop', '# trailing stop: 1.5 x ATR', '# ATR length: 20']);
+  });
+  it('adds the ATR timeframe line after the ATR length only when given', () => {
+    const lines = optimizeContextLines({ ...ctx, exits: { stopLoss: '2 x ATR', atrLength: 20, atrTimeframe: 4 } }, result);
+    const at = lines.indexOf('# ATR length: 20');
+    expect(at).toBeGreaterThan(0);
+    expect(lines[at + 1]).toBe('# ATR timeframe: 4x the chart');
   });
 });
 
@@ -316,5 +332,16 @@ describe('Pine text inputs in the context', () => {
 
   it('leaves the line as before without them', () => {
     expect(optimizeContextLines(ctx, result)[1]).toBe('# fixed params: threshold=1.5; we"ird=2');
+  });
+});
+
+describe('risk sizing in the context lines', () => {
+  it('names risk per trade instead of the position size, and keeps the old line without it', () => {
+    const risky = optimizeContextLines({ ...ctx, riskPct: 2 }, result);
+    expect(risky).toContain('# risk per trade %: 2');
+    expect(risky.some((l) => l.startsWith('# position size %'))).toBe(false);
+    const plain = optimizeContextLines(ctx, result);
+    expect(plain).toContain('# position size %: 100');
+    expect(plain.some((l) => l.includes('risk per trade'))).toBe(false);
   });
 });

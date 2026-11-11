@@ -141,16 +141,6 @@ textarea {
   margin: 0 2px;
 }
 
-.topbar-range {
-  color: var(--muted-2);
-  font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-  flex: 0 1 auto;
-}
-
 .topbar-right {
   margin-left: auto;
   display: flex;
@@ -309,6 +299,20 @@ button.icon {
 .live-dot.error {
   background: var(--red);
   animation: none;
+}
+.live-dot.off {
+  background: var(--muted-2);
+  animation: none;
+}
+
+.badge.live-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 2px;
 }
 
 .spinner {
@@ -786,6 +790,12 @@ button.icon {
   gap: 2px;
 }
 
+.chart-legend .legend-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .chart-legend .legend-line {
   display: flex;
   flex-wrap: wrap;
@@ -819,6 +829,136 @@ button.icon {
   font-weight: 600;
 }
 
+/*
+ * Indicator legend rows. The legend layers stay click-through; only the row elements take pointer events, so a pan or
+ * a drawing that starts anywhere else works as it always did. The buttons show while a row is hovered or focused (and
+ * always on touch, where there is no hover).
+ */
+.legend-rows {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  pointer-events: none;
+  max-width: 100%;
+}
+
+.legend-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 8px;
+  max-width: 100%;
+  pointer-events: auto;
+  font-size: 11.5px;
+  line-height: 18px;
+}
+
+.legend-row.is-hidden {
+  opacity: 0.5;
+}
+
+.legend-row-name,
+.pane-legend-title {
+  font-weight: 650;
+  letter-spacing: 0.2px;
+}
+
+.legend-row-params,
+.legend-row-na {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+.legend-row-entry {
+  font-family: var(--mono);
+}
+
+.legend-row-entry b {
+  font-weight: 600;
+}
+
+.legend-row-plot {
+  opacity: 0.8;
+}
+
+.legend-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  align-self: center;
+  /* Taller than the text line: the margins keep the buttons from growing the row or the pane legend. */
+  margin: -4px 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.legend-row:hover .legend-actions,
+.legend-row:focus-within .legend-actions,
+.pane-legend:has(:is(.pane-legend-title, .pane-legend-params, .pane-legend-entry):hover) .legend-actions,
+.pane-legend:focus-within .legend-actions,
+.legend-actions:hover,
+.legend-actions.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .legend-actions {
+    opacity: 0.85;
+    pointer-events: auto;
+  }
+}
+
+.legend-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.legend-btn:hover,
+.legend-btn:focus-visible {
+  background: var(--panel-2, rgba(255, 255, 255, 0.08));
+  color: var(--text);
+}
+
+.legend-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 150px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border-2);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.legend-menu-item {
+  text-align: left;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.legend-menu-item:hover,
+.legend-menu-item:focus-visible {
+  background: var(--panel-2, rgba(255, 255, 255, 0.08));
+  outline: none;
+}
+
 /* Legend at the top-left of each indicator sub pane; the hook sets top, left and right from the pane's box. */
 .pane-legends {
   position: absolute;
@@ -836,6 +976,21 @@ button.icon {
   column-gap: 10px;
   pointer-events: none;
   font-size: 11px;
+}
+
+/* The text is rewritten on every crosshair move; it adds no box of its own, so the parts wrap as they always did. */
+.pane-legend .pane-legend-text {
+  display: contents;
+}
+
+.pane-legend .legend-actions-host {
+  display: inline-flex;
+}
+
+.pane-legend .pane-legend-title,
+.pane-legend .pane-legend-params,
+.pane-legend .pane-legend-entry {
+  pointer-events: auto;
 }
 
 .pane-legend .pane-legend-title {
@@ -1405,6 +1560,27 @@ button.icon {
   font-family: var(--mono);
 }
 
+/* A field with a mode select beside its value (the Backtest exits): two grid columns. */
+.form-field .exit-row {
+  display: flex;
+  gap: 6px;
+}
+
+.form-field .exit-row select {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.form-field .exit-row input {
+  flex: 0 0 72px;
+  width: 72px;
+  min-width: 0;
+}
+
+.form-field.wide {
+  grid-column: span 2;
+}
+
 .form-row {
   display: flex;
   gap: 8px;
@@ -1438,6 +1614,13 @@ button.icon {
   gap: 8px;
 }
 
+.filters-line {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .metric-card {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -1458,6 +1641,18 @@ button.icon {
   font-family: var(--mono);
   font-size: 15px;
   font-weight: 600;
+}
+
+.metric-card .m-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted-2);
+  margin-top: 3px;
+  overflow-wrap: normal;
+}
+
+.metric-card .m-sub .nowrap {
+  white-space: nowrap;
 }
 
 .pos {
@@ -1963,12 +2158,6 @@ a:hover {
   overflow: auto;
 }
 
-@media (max-width: 700px) {
-  .topbar-range {
-    display: none;
-  }
-}
-
 /* ------------------------- connection status -------------------------- */
 
 .conn-status {
@@ -2294,7 +2483,8 @@ a:hover {
 .pine-pane-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   flex-shrink: 0;
   padding: 6px 8px 6px 12px;
   border-bottom: 1px solid var(--border);
@@ -2346,6 +2536,13 @@ a:hover {
 .pine-log-warning .pine-log-level, .pine-log-warning { color: var(--amber); }
 .pine-log-error .pine-log-level, .pine-log-error { color: var(--red); }
 .pine-log-warning .pine-msg-time, .pine-log-error .pine-msg-time { color: var(--muted-2); }
+
+.pine-entry-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
 
 .pine-status {
   display: flex;
@@ -2451,7 +2648,8 @@ a:hover {
 
 /* ------------------------------ top bar: More ------------------------------ */
 
-.topbar-more {
+.topbar-more,
+.topbar-popwrap {
   position: relative;
   display: flex;
   align-items: center;
@@ -2476,6 +2674,19 @@ a:hover {
   border: 1px solid var(--border-2, var(--border));
   border-radius: 8px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+}
+
+.topbar-more-pop.topbar-pop-left {
+  right: auto;
+}
+
+.topbar .topbar-data-pop .btn-label {
+  display: inline;
+}
+
+.topbar-data-pop .data-range {
+  color: var(--muted-2);
+  font-size: 11px;
 }
 
 .more-row {
@@ -2533,6 +2744,11 @@ a:hover {
 
   .topbar-right {
     gap: 4px;
+  }
+
+  /* Undo and Redo are the last controls to fit on a tablet: a little narrower keeps the row inside the screen. */
+  .topbar button.icon.undo-btn {
+    width: 24px;
   }
 }
 
@@ -3016,7 +3232,21 @@ a:hover {
   min-width: 0;
   min-height: 0;
 }
-.pine-compare-link {
+.bt-strategy-row {
+  grid-column: span 2;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+.bt-strategy-row > .form-field {
+  flex: 1;
+  min-width: 0;
+}
+.bt-sm-link {
+  padding-bottom: 6px;
+}
+.pine-compare-link,
+.bt-sm-link {
   font-size: 12px;
   white-space: nowrap;
 }
@@ -3396,6 +3626,40 @@ a:hover {
 .pine-libs-button {
   font-size: 12px;
   white-space: nowrap;
+}
+
+/* ------------------------ Pine TradingView indicators ------------------------ */
+.pine-ind-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.pine-ind-row input {
+  flex: 1;
+  min-width: 0;
+}
+.pine-ind-list {
+  max-height: 220px;
+}
+.pine-ind-list button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.pine-ind-list li {
+  flex-wrap: wrap;
+}
+.pine-ind-main {
+  flex: 1 1 240px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pine-ind-name {
+  font-weight: 600;
+}
+.pine-ind-licence {
+  overflow-wrap: anywhere;
 }
 
 /* ------------------------- custom intervals dialog ------------------------- */
@@ -4180,6 +4444,10 @@ table.data-table th.sortable .sort-btn:focus-visible {
 }
 
 /* ----------------------------- settings ----------------------------- */
+.settings-section + .settings-section {
+  margin-top: 18px;
+}
+
 .settings-section h3 {
   margin: 0 0 10px;
   font-size: 12px;
@@ -4217,4 +4485,232 @@ table.data-table th.sortable .sort-btn:focus-visible {
 .settings-radio-label,
 .settings-radio-hint {
   display: block;
+}
+
+.settings-benchmark {
+  margin-top: 12px;
+}
+
+.settings-benchmark-bar {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-benchmark p {
+  margin: 0;
+}
+
+.settings-benchmark-table td:nth-child(2),
+.settings-benchmark-table td:nth-child(3),
+.settings-benchmark-table td:nth-child(4),
+.settings-benchmark-table th:nth-child(4) {
+  white-space: nowrap;
+}
+
+.ind-defaults {
+  position: relative;
+}
+
+.ind-defaults-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.ind-defaults-menu button {
+  text-align: left;
+  border-color: transparent;
+  background: transparent;
+}
+
+.ind-defaults-menu button:hover {
+  background: var(--panel-3);
+}
+
+/* the Style tab of the indicator settings */
+.ind-plot {
+  position: relative;
+  flex-wrap: wrap;
+}
+.ind-plot-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+}
+.ind-plot-controls {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.ind-color {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 6px;
+}
+.ind-color .dt-chip {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid var(--border-3);
+}
+.ind-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.ind-pop {
+  flex-basis: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+}
+.ind-pop.dt-list {
+  gap: 0;
+  padding: 4px;
+}
+.ind-pop .dt-swatches {
+  margin-bottom: 0;
+}
+.ind-pop .dt-list button,
+.ind-pop.dt-list button {
+  padding: 4px 8px;
+}
+.ind-opacity {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.ind-opacity-value {
+  min-width: 36px;
+  text-align: right;
+}
+.ind-choices {
+  display: inline-flex;
+  gap: 4px;
+}
+.ind-choice {
+  min-width: 28px;
+  padding: 2px 6px;
+}
+.ind-choice[aria-checked='true'] {
+  background: var(--panel-3);
+  border-color: var(--accent);
+}
+.ds-section {
+  margin: 14px 0 2px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.startup-error {
+  max-width: 480px;
+  margin: 18vh auto 0;
+  padding: 0 24px;
+  text-align: center;
+}
+.startup-error h1 {
+  font-size: 20px;
+  margin: 0 0 12px;
+}
+.startup-error p {
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 0 0 20px;
+}
+
+/* ------------------------- price scale buttons and menu group ------------------------- */
+
+.price-scale-buttons {
+  position: absolute;
+  z-index: 6;
+  display: flex;
+  justify-content: flex-end;
+  box-sizing: border-box;
+  padding-right: 4px;
+}
+.price-scale-buttons button {
+  width: var(--ps-size, 22px);
+  height: var(--ps-size, 22px);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  border: 1px solid var(--border-2);
+  background: var(--bg-2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+.price-scale-buttons button.on {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--bg);
+}
+.chart-context-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+.chart-context-menu-group {
+  padding: 2px 8px 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.chart-context-menu .menu-check {
+  display: inline-block;
+  width: 14px;
+}
+
+/* The Composed settings' TradingView indicator roles (entry rule and filters). */
+.bt-roles {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.bt-roles > .btn {
+  align-self: flex-start;
+}
+
+.bt-role {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.bt-role-grid {
+  margin-top: 6px;
+}
+
+.bt-role-grid .wide-row {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.bt-role-error {
+  color: var(--red, #ef5350);
 }

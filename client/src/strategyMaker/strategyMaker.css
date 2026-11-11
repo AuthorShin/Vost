@@ -1,0 +1,637 @@
+.sm-page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: var(--bg);
+  color: var(--text);
+}
+.sm-head {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.sm-head h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.sm-head p {
+  margin: 2px 0 0;
+  color: var(--muted);
+}
+.sm-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 24px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.sm-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+.sm-group label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--muted);
+  min-width: 0;
+}
+.sm-group select,
+.sm-group input:not([type='file']) {
+  max-width: 100%;
+  min-width: 0;
+  width: 150px;
+}
+.sm-group input[type='file'] {
+  max-width: 100%;
+  width: 220px;
+}
+.sm-note {
+  color: var(--muted);
+  align-self: center;
+}
+.sm-error {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--red);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.sm-main {
+  flex: 1 0 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 8px 12px;
+}
+.sm-label {
+  color: var(--muted);
+  padding-bottom: 6px;
+}
+.sm-chart {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.sm-empty {
+  margin: auto;
+  color: var(--muted);
+  text-align: center;
+}
+.sm-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 16px;
+  padding-bottom: 6px;
+}
+.sm-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sm-toolbar button[aria-pressed='true'] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.sm-toolbar .sm-long {
+  border-left: 3px solid var(--green);
+}
+.sm-toolbar .sm-short {
+  border-left: 3px solid var(--red);
+}
+.sm-count {
+  color: var(--muted);
+}
+.sm-count strong {
+  color: var(--text);
+}
+.sm-warn {
+  margin: 0 0 6px;
+  color: var(--amber);
+}
+.sm-work {
+  flex: none;
+  height: max(360px, 58vh);
+  height: max(360px, 58dvh);
+  display: flex;
+  gap: 8px;
+}
+.sm-chart-tool {
+  touch-action: none;
+  cursor: crosshair;
+}
+.sm-side {
+  width: 260px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+  padding-left: 8px;
+}
+.sm-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sm-row {
+  display: flex;
+  gap: 4px;
+}
+.sm-row-main {
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  text-align: left;
+}
+.sm-tag-long {
+  color: var(--green);
+  font-weight: 600;
+}
+.sm-tag-short {
+  color: var(--red);
+  font-weight: 600;
+}
+.sm-when {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.sm-bars {
+  color: var(--muted);
+}
+.sm-list-empty {
+  margin: 0;
+}
+@media (max-width: 700px) {
+  .sm-work {
+    flex-direction: column;
+  }
+  .sm-side {
+    width: auto;
+    max-height: 28%;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    padding: 6px 0 0;
+  }
+}
+
+.sm-legend {
+  display: flex;
+  gap: 16px;
+  color: var(--muted);
+  padding-bottom: 6px;
+}
+.sm-key {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 4px;
+  vertical-align: -2px;
+  border-radius: 50%;
+}
+.sm-key-yours {
+  background: var(--green);
+  opacity: 0.5;
+  border-radius: 2px;
+}
+.sm-key-found {
+  border: 2px solid var(--amber);
+}
+.sm-find {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.sm-find h2,
+.sm-sets h2,
+.sm-saved h2,
+.sm-conflicts h3,
+.sm-res-block h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.sm-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+.sm-form fieldset {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin: 0;
+  padding: 6px 10px 8px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sm-form legend {
+  color: var(--muted);
+  padding: 0 4px;
+}
+.sm-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sm-field-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.sm-field input {
+  width: 90px;
+  min-width: 0;
+}
+.sm-field input[aria-invalid='true'] {
+  border-color: var(--red);
+}
+.sm-unit {
+  color: var(--muted);
+  min-width: 24px;
+}
+.sm-field-error {
+  color: var(--red);
+  max-width: 200px;
+}
+.sm-find-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.sm-primary:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.sm-progress {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin-top: 8px;
+}
+.sm-progress progress {
+  width: min(320px, 100%);
+}
+.sm-results {
+  margin: 14px 0 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.sm-results p,
+.sm-results ul {
+  margin: 0;
+}
+.sm-results ul {
+  padding-left: 18px;
+}
+.sm-headline {
+  font-weight: 600;
+}
+.sm-rules {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.sm-table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+.sm-table {
+  border-collapse: collapse;
+  min-width: 100%;
+}
+.sm-table th,
+.sm-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+  vertical-align: top;
+}
+.sm-table th:first-child,
+.sm-table td:first-child {
+  text-align: left;
+}
+.sm-table thead th {
+  color: var(--muted);
+  font-weight: 500;
+  text-align: center;
+}
+.sm-selected {
+  background: var(--panel-2);
+  outline: 1px solid var(--amber);
+}
+.sm-pick {
+  text-align: left;
+}
+.sm-pick[aria-pressed='true'] {
+  border-color: var(--amber);
+}
+.sm-badge {
+  display: inline-block;
+  margin: 2px 4px 0 0;
+  padding: 0 6px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+}
+.sm-badge-miss {
+  background: var(--panel-3);
+  color: var(--muted);
+}
+.sm-ok {
+  color: var(--green);
+  font-weight: 600;
+}
+.sm-bad {
+  color: var(--red);
+  font-weight: 600;
+}
+.sm-checks {
+  list-style: none;
+  padding-left: 0 !important;
+}
+.sm-limits {
+  color: var(--muted);
+}
+
+.sm-sets,
+.sm-saved,
+.sm-conflicts {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  min-width: 0;
+}
+.sm-set-list,
+.sm-conflicts ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.sm-set-list li,
+.sm-conflicts li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.sm-set-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sm-set-actions,
+.sm-set-exchange,
+.sm-conflict-choice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.sm-set-exchange {
+  margin-top: 10px;
+}
+.sm-import {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.sm-import input {
+  max-width: 220px;
+}
+.sm-stale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--amber);
+  border-radius: 6px;
+}
+.sm-stale p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.sm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.sm-actions-for {
+  font-weight: 600;
+}
+.sm-copied {
+  color: var(--green, #3fb950);
+  min-width: 52px;
+}
+.sm-copy-text {
+  flex: 1 1 100%;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+/* Search markets */
+.sm-sweep {
+  min-width: 0;
+}
+.sm-sweep-count {
+  margin: 10px 0 0;
+  font-weight: 600;
+}
+.sm-target-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 4px 10px;
+}
+.sm-or {
+  color: var(--muted);
+  align-self: center;
+}
+.sm-sort {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sm-sort:hover {
+  text-decoration: underline;
+}
+.sm-sweep .sm-badge {
+  margin-left: 6px;
+}
+.sm-sweep .sm-table th:nth-child(3),
+.sm-sweep .sm-table td:nth-child(3) {
+  text-align: left;
+}
+.sm-sweep .sm-table td:last-child {
+  text-align: right;
+}
+.sm-sweep .sm-table-wrap {
+  max-height: 440px;
+  overflow: auto;
+}
+.sm-sweep .sm-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
+}
+.sm-sweep .sm-table th {
+  white-space: normal;
+  vertical-align: bottom;
+}
+.sm-sweep .sm-table th:nth-child(2),
+.sm-sweep .sm-table td:nth-child(2) {
+  text-align: left;
+}
+.sm-sweep .sm-res-block .sm-note {
+  margin: 6px 0;
+}
+.sm-sweep .sm-results .sm-note {
+  align-self: auto;
+}
+.sm-tag-style {
+  font-size: 11px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--muted, inherit);
+  white-space: nowrap;
+}
+.sm-style details {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.sm-style summary {
+  cursor: pointer;
+}
+.sm-style details ul {
+  max-height: 260px;
+  overflow: auto;
+}
+
+/* TradingView indicators in the market search */
+.sm-form fieldset.sm-pine {
+  flex: 1 1 100%;
+  max-width: 100%;
+}
+.sm-pine-role {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+.sm-pine-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+.sm-pine-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px 14px;
+}
+.sm-pine .form-field,
+.sm-pine .sm-pine-num {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.sm-pine .form-field > span,
+.sm-pine .sm-pine-num > span {
+  color: var(--muted);
+}
+.sm-pine .form-field input[type='number'],
+.sm-pine .sm-pine-num input {
+  width: 90px;
+  min-width: 0;
+}
+.sm-pine .exit-row {
+  display: flex;
+  gap: 4px;
+}
+.sm-pine .wide-row {
+  flex-basis: 100%;
+  margin: 0;
+}
+.sm-pine-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sm-pine-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 4px 12px;
+}
+.sm-pine-input-name {
+  min-width: 90px;
+  align-self: center;
+  overflow-wrap: anywhere;
+}
+.sm-pine-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* A long setting wording (a TradingView indicator with its inputs) wraps instead of widening the table. */
+.sm-sweep .sm-table td:nth-child(3) .sm-bars {
+  white-space: normal;
+  min-width: 260px;
+  max-width: 420px;
+}

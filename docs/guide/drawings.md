@@ -85,7 +85,9 @@ Click the star beside a tool to favourite it; the list stays open. Favourites sh
 
 ## Working with drawings
 
-Click a drawing to select it, drag to move it and drag a handle to resize it. Delete or Backspace removes the selected drawing (or all the selected drawings). **Ctrl or Cmd+Z** undoes, **Ctrl or Cmd+Shift+Z** (or Ctrl+Y) redoes, Escape leaves the tool or clears the selection. With several charts these keys act on the active chart only ([Layouts](layouts.md)).
+Click a drawing to select it, drag to move it and drag a handle to resize it. Delete or Backspace removes the selected drawing (or all the selected drawings). **Ctrl or Cmd+Z** undoes, **Ctrl or Cmd+Shift+Z** (or Ctrl+Y) redoes, Escape leaves the tool or clears the selection. The **Undo** and **Redo** buttons in the top bar do the same and are greyed out when there is nothing to undo or redo (on a narrow window they sit in the **More** menu). With several charts the keys and buttons act on the active chart only ([Layouts](layouts.md)).
+
+![Top bar Undo enabled after drawing](../evidence/drawing-manage/drawing-manage-topbar-undo-desktop.png)
 
 The rail also has:
 
@@ -192,9 +194,9 @@ The dialog fits a phone screen.
 
 ## Where they are saved
 
-Drawings are saved per symbol in your browser, and keep their place across zoom, timeframe changes and live bars. Charts on the same market share their drawings. Drawings saved by an older version are carried over, and drawings from a newer version (a tool or a setting this version does not know) are kept as they are and written back unchanged, though this version does not show them.
+Drawings are saved per symbol on the server, and keep their place across zoom, timeframe changes and live bars. Charts on the same market share their drawings. Drawings saved by an older version are carried over, and drawings from a newer version (a tool or a setting this version does not know) are kept as they are and written back unchanged, though this version does not show them.
 
-Pictures added with the [Image tool](drawing-annotations.md#image) are kept in a separate picture store in your browser (IndexedDB), which is cleared with the site's data. A drawing copied to another browser does not carry its picture and shows a "Picture missing" box there.
+Pictures added with the [Image tool](drawing-annotations.md#image) are kept on the Vost server, not in your browser, so they are not lost when you clear the site's data and they show in any browser on the same server. A "Picture missing" box appears only for a picture the server no longer has.
 
 ## On phones
 

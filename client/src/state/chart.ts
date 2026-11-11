@@ -7,6 +7,7 @@
  * Heavy computations run in a dedicated Web Worker (see ./worker).
  */
 import { createStore, type StoreApi } from 'zustand/vanilla';
+import { DEFAULT_PRICE_SCALE_MODE, type PriceScaleModeId } from '../lib/priceScaleMode';
 import { applyKline, mergeCandles } from '../lib/applyKline';
 import { MAX_BARS, intervalSeconds, parseInterval } from '../../../shared/market.ts';
 import type { Candle, Dataset, Interval } from '../types';
@@ -17,20 +18,23 @@ import type { OptimizeConfig, OptimizeRow, MetricKey } from '../lib/backtest/opt
 import { defaultOptimizeConfig } from '../lib/backtest/optimizer';
 import type { MonteCarloOptions, MonteCarloResult } from '../lib/backtest/monteCarlo';
 import { DEFAULT_MONTE_CARLO } from '../lib/backtest/monteCarlo';
+import { exitContext, hasAnyStop, R_NEEDS_STOP, rTargetNeedsStop } from '../lib/backtest/exits';
 import { getStrategy } from '../lib/backtest/strategies';
+import { rolesInUse } from '../lib/backtest/pineRole';
 import type { OptimizeRunContext } from '../lib/backtest/optimizerCsv';
 import { spanOf, splitBars, validationProblem, type ValidationOutput } from '../lib/backtest/validation';
 import { walkForwardWindows, type WalkForwardOutput } from '../lib/backtest/walkForward';
 import { DEFAULT_PINE_CODE } from '../lib/pine/examples';
 import type { PineInput, PineMarket } from '../lib/pine/types';
-import type { IndicatorKind, IndicatorSpec } from '../lib/indicatorCompute';
+import type { IndicatorDefault, IndicatorKind, IndicatorSpec } from '../lib/indicatorCompute';
 import { defaultIndicator } from '../lib/indicatorCompute';
+import { tidy } from '../lib/plotStyle';
 import type { MessageSeverity } from '../lib/messages';
-import type { PineError, PineInputValue, PineResult, PineRunOutcome } from '../lib/pine/types';
+import type { PineCalculation, PineError, PineInputValue, PineResult, PineRunOutcome } from '../lib/pine/types';
 import { type Source } from '../../../shared/timeframes.ts';
 import type { HistoryRequest, LiveHandle, LiveStatus } from '../lib/providers/http';
 import { getProvider, type SymbolSuggestion } from '../lib/providers';
-import { HISTORY_PAGE_BARS, belowHistoryCap, isHistoryStart, nextPageRequest, runPageBars, type HistoryLoading } from '../lib/historyPaging';
+import { HISTORY_MAX_BARS, HISTORY_PAGE_BARS, belowHistoryCap, isHistoryStart, nextPageRequest, runPageBars, type HistoryLoading } from '../lib/historyPaging';
 import { ApiHttpError } from '../lib/providers/api';
 import { servable } from '../lib/customTimeframes';
 import { fmtTime } from '../lib/format';
@@ -46,7 +50,9 @@ import {
   stepReplay as stepPosition,
 } from '../lib/replay';
 import { nextPineSelection } from '../lib/pineSelection';
-import { CancelledError, optimizerCall, workerCall } from './worker';
+import { CancelledError, workerCall } from './worker';
+import { reattachJobs, runJob, runOptimizerJob, ServerRestartedError, type JobRun, type JobSetting, type JobOptions } from './jobs';
+import { AUTO_UNMEASURED } from '../lib/benchmark';
 import type { BroadcastOpt, SyncChange } from '../lib/layoutSync';
 
 /** Latest Pine run of one indicator entry. `result` is kept while a newer run is in flight. */
@@ -115,6 +121,7 @@ export interface ChartInitial {
   btConfig: BacktestConfig;
   showTrades: boolean;
   btRange: TimeRange;
+  priceScaleMode: PriceScaleModeId;
 }
 
 export function defaultChartInitial(): ChartInitial {
@@ -130,6 +137,7 @@ export function defaultChartInitial(): ChartInitial {
     btConfig: defaultBacktestConfig(),
     showTrades: true,
     btRange: { from: null, to: null },
+    priceScaleMode: DEFAULT_PRICE_SCALE_MODE,
   };
 }
 
@@ -143,10 +151,16 @@ export interface ChartEnv {
   buildTimeframes(): boolean;
   /** How history loads: the latest page plus older pages on scroll, or everything at once. */
   historyLoading(): HistoryLoading;
+  /** Whether a Pine script's live bar sees the forming higher-timeframe bar (TradingView) or only finished ones. */
+  pineHigherBars(): 'forming' | 'finished';
+  /** Where backtests, optimizer runs and Monte Carlo runs start: in this tab or on the server. Read when a job starts. */
+  jobPlace(): JobSetting;
   /** The saved local datasets. */
   datasets(): Dataset[];
   addDataset(dataset: Dataset): void;
   removeDataset(id: string): void;
+  /** The saved default a new indicator of `kind` starts from, if any. */
+  indicatorDefault?(kind: IndicatorKind): IndicatorDefault | null;
   /** A persisted per-chart field changed: the app should save the prefs. */
   onPrefsChange(): void;
   /** A committed change on chart `sourceId` that the other charts of the layout may follow (see lib/layoutSync). */
@@ -163,6 +177,8 @@ export interface ChartState {
   bars: number;
   indicators: IndicatorSpec[];
   showTrades: boolean;
+  /** How the main pane's price scale maps prices (persisted per chart). */
+  priceScaleMode: PriceScaleModeId;
   /** Pine run state by indicator id (not persisted). */
   pineRuns: Record<string, PineRunState>;
   selectedPineId: string | null;
@@ -252,12 +268,12 @@ export interface ChartState {
    * Loads the page of bars before the first loaded one and merges it in (same series, same `dataKey`). One page in
    * flight at a time: a call meanwhile returns that page's result. Never pages a dataset, a chart range or a replay.
    */
-  loadOlder(pageBars?: number): Promise<OlderResult>;
+  loadOlder(pageBars?: number, opts?: { run?: boolean }): Promise<OlderResult>;
   /**
    * Pages older bars in until the first loaded bar is at or before `time`, or the history start, a failure or the cap
    * stops it, and says which: covered, the history start, skipped (nothing to page, the data changed, or the cap) or an error.
    */
-  loadHistoryTo(time: number, opts?: { pageBars?: number }): Promise<HistoryToResult>;
+  loadHistoryTo(time: number, opts?: { pageBars?: number; run?: boolean }): Promise<HistoryToResult>;
   clearViewRequest(): void;
   clearData(): void;
   addDataset(input: { name: string; candles: Candle[]; source: string; description: string; barSeconds: number; barLabel: string }): string;
@@ -267,8 +283,17 @@ export interface ChartState {
   /** Adds an indicator and returns its id. */
   addIndicator(kind: IndicatorKind): string;
   removeIndicator(id: string): void;
-  updateIndicator(id: string, patch: Partial<Pick<IndicatorSpec, 'params' | 'color' | 'visible' | 'source'>> & { inputs?: Record<string, PineInputValue> }): void;
+  updateIndicator(id: string, patch: Partial<Pick<IndicatorSpec, 'params' | 'color' | 'visible' | 'source' | 'hideOn' | 'style'>> & { inputs?: Record<string, PineInputValue>; calculation?: PineCalculation }): void;
+  /** Replaces a whole indicator spec (the settings dialog's Cancel and Reset); Pine reruns when what it computes from differs. */
+  restoreIndicator(id: string, spec: IndicatorSpec): void;
+  /** Pine: keeps edited editor text as a draft (no run); cleared when it equals the applied source. */
+  setPineDraft(id: string, text: string): void;
+  /** Pine: puts the draft on the chart as the source and runs it once. No-op without a draft. */
+  applyPineDraft(id: string): void;
+  /** Re-runs every Pine indicator (a setting that changes what a run sees). */
+  rerunPine(): void;
   setShowTrades(v: boolean): void;
+  setPriceScaleMode(mode: PriceScaleModeId): void;
   setBtConfig(patch: Partial<BacktestConfig>): void;
   setBtRange(range: TimeRange): void;
   /**
@@ -305,6 +330,71 @@ export interface ChartState {
 
 export type ChartStore = StoreApi<ChartState>;
 
+/** A spec with an empty `hideOn` list stored as no list at all. */
+const RISK_NEEDS_STOP = 'Risk per trade needs a stop loss';
+
+/** Risk sizing is set but no stop loss is on (Pine sizes in its own script, so it is exempt). */
+function riskNeedsStop(c: BacktestConfig): boolean {
+  return c.riskPct != null && c.strategyId !== 'pine' && !hasAnyStop(c);
+}
+
+/** The reason a run cannot start from its exit settings, or null. */
+function exitsProblem(c: BacktestConfig): string | null {
+  if (riskNeedsStop(c)) return RISK_NEEDS_STOP;
+  if (c.strategyId !== 'pine' && rTargetNeedsStop(c)) return R_NEEDS_STOP;
+  return null;
+}
+
+/**
+ * The run request's config: the saved settings plus, for each stored TradingView indicator the run reads, its source
+ * (fetched now, never saved). An indicator that is gone is left without a source and the run fails naming it.
+ */
+export async function withRoleSources(config: BacktestConfig): Promise<BacktestConfig> {
+  if (!config.pineRoles?.length) return config;
+  let used: string[];
+  try {
+    used = rolesInUse(config).map((r) => r.indicatorId);
+  } catch {
+    return config; // malformed roles fail in the run itself, with a plain message
+  }
+  const sources = new Map<string, string | null>();
+  await Promise.all(
+    [...new Set(used)].map(async (id) => {
+      const res = await fetch(`/api/pine/indicators/${encodeURIComponent(id)}`);
+      if (res.status === 404) return void sources.set(id, null);
+      if (!res.ok) throw new Error(`Could not load the stored TradingView indicator (${res.status})`);
+      const body = (await res.json()) as { source?: unknown };
+      sources.set(id, typeof body.source === 'string' ? body.source : null);
+    }),
+  );
+  return {
+    ...config,
+    pineRoles: config.pineRoles.map((r) => {
+      const { source: _drop, ...rest } = r;
+      const source = sources.get(r.indicatorId);
+      return source ? { ...rest, source } : rest;
+    }),
+  };
+}
+
+function withoutEmptyHideOn(spec: IndicatorSpec): IndicatorSpec {
+  let out = spec;
+  if (out.hideOn && out.hideOn.length === 0) {
+    const { hideOn: _unused, ...rest } = out;
+    void _unused;
+    out = rest;
+  }
+  if ('style' in out) {
+    const style = tidy(out.style);
+    if (!style) {
+      const { style: _s, ...rest } = out;
+      void _s;
+      out = rest;
+    } else if (style !== out.style) out = { ...out, style };
+  }
+  return out;
+}
+
 export function createChartStore(id: string, initial: ChartInitial, env: ChartEnv): ChartStore {
   return createStore<ChartState>()((set, get) => {
   const id0 = id; // the chart's id, for actions whose own argument is named id
@@ -312,6 +402,79 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
   let liveHandle: LiveHandle | null = null;
   /** The running optimizer sweep: its cancel handle and the result shown before it started. */
   let mcToken = 0;
+  /** The server job the shown backtest came from (null for a browser run), so a Monte Carlo job can be matched to it after a reload. */
+  let btRun: { result: BacktestResult; id: string } | null = null;
+  const shownRunId = (): string | null => (btRun && btRun.result === get().btResult ? btRun.id : null);
+  /** Options every server-capable job passes: the fallback notice, once. */
+  /** "on the server (Auto)": where a job ran, with "(Auto)" when Auto chose the place. */
+  const ranWhere = (job: JobRun): string => `${job.place() === 'server' ? 'on the server' : 'in the browser'}${job.auto ? ' (Auto)' : ''}`;
+  /** Auto had nothing to choose by, so the job ran in the browser: say so once, at the end of the finish message. */
+  const autoNote = (job: JobRun): string => (job.unmeasured ? ` ${AUTO_UNMEASURED}` : '');
+  const serverNotice = (source: string): JobOptions['onFallback'] => (reason) => {
+    const text = `Server jobs unavailable (${reason}); running in the browser`;
+    env.pushToast('info', text);
+    env.pushMessage(source, 'info', text);
+  };
+  /** A result shown by a reattach before the chart's first bars arrived: the bars' arrival must not clear it. */
+  let restoredBeforeBars = false;
+  const reattachServerJobs = (): void => {
+    const failText = (restarted: boolean, label: string, err: Error): string => (restarted ? err.message : `${label} failed: ${err.message}`);
+    void reattachJobs({
+      chartId: id0,
+      current: () => ({ symbol: get().symbol, timeframe: get().timeframe, strategyId: get().btConfig.strategyId, runId: shownRunId() }),
+      running(kind, pct, stage, cancel) {
+        if (kind === 'run') set({ btRunning: true, btProgress: pct, btStage: stage ?? null, btError: null });
+        else if (kind === 'montecarlo') set({ mcRunning: true, mcError: null });
+        else {
+          if (!optRun) optRun = { cancel, previous: get().optResult };
+          set({ optRunning: true, optProgress: pct });
+        }
+      },
+      done(kind, record, body) {
+        if (kind === 'run') {
+          const result = body.result as BacktestResult;
+          btRun = { result, id: record.id };
+          if (get().candles.length === 0) restoredBeforeBars = true;
+          set({ btResult: result, btRunning: false, btProgress: 0, btStage: null });
+        } else if (kind === 'montecarlo') {
+          const source = get().btResult;
+          if (!source || shownRunId() !== record.sourceRunId) return set({ mcRunning: false });
+          set({ mcResult: { source, result: body.result as MonteCarloResult, options: record.options ?? get().mcConfig }, mcRunning: false });
+        } else if (!record.context) {
+          optRun = null;
+          set({ optRunning: false, optProgress: 0 });
+        } else {
+          optRun = null;
+          if (get().candles.length === 0) restoredBeforeBars = true;
+          const b = body as unknown as NonNullable<ChartState['optResult']>;
+          set({
+            optResult: { rows: b.rows, keys: b.keys, metric: b.metric, combos: b.combos, errored: b.errored, validation: b.validation, walkForward: b.walkForward, context: record.context },
+            optRunning: false,
+            optProgress: 1,
+          });
+        }
+      },
+      failed(kind, err) {
+        const restarted = err instanceof ServerRestartedError;
+        if (kind === 'run') set({ btRunning: false, btProgress: 0, btStage: null, btError: restarted ? null : err.message });
+        else if (kind === 'montecarlo') set({ mcRunning: false });
+        else {
+          optRun = null;
+          set({ optRunning: false, optProgress: 0 });
+        }
+        env.pushToast('error', failText(restarted, kind === 'run' ? 'Backtest' : kind === 'optimize' ? 'Optimizer' : 'Monte Carlo', err));
+      },
+      stopped(kind) {
+        if (kind === 'run') set({ btRunning: false, btProgress: 0, btStage: null });
+        else if (kind === 'montecarlo') set({ mcRunning: false });
+        else {
+          optRun = null;
+          set({ optRunning: false, optProgress: 0 });
+        }
+      },
+      note: (text) => env.pushMessage('Backtest', 'info', text),
+    });
+  };
   let optRun: { cancel: () => void; previous: ChartState['optResult'] } | null = null;
   /** The replay play timer; every path that ends replay clears it. */
   let replayTimer: ReturnType<typeof setTimeout> | null = null;
@@ -327,15 +490,15 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
   let olderSeq = 0;
   let olderInflight: Promise<OlderResult> | null = null;
 
-  /** Whether a run over `range` must first load history: scroll mode on a live series, From set and before the first loaded bar. */
-  const runNeedsHistory = (range: TimeRange): boolean => runNeedsHistoryOf(get(), env.historyLoading(), range);
+  /** Whether a run over `range` must first load history: a live series that can page older, with From open or before the first loaded bar. */
+  const runNeedsHistory = (range: TimeRange): boolean => runNeedsHistoryOf(get(), range);
 
   /**
    * Loads the older bars a run's range needs. `ok` is false when the load failed or the chart's data changed meanwhile;
    * `extended` says the history was paged (so the chart should move to the range). The cap or the history start stopping
    * short of From is not a failure: the run uses what exists.
    */
-  const loadRunHistory = async (from: number): Promise<{ ok: boolean; extended: boolean }> => {
+  const loadRunHistory = async (from: number | null): Promise<{ ok: boolean; extended: boolean }> => {
     const s0 = get();
     const same = () => {
       const n = get();
@@ -349,7 +512,10 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
         n.replay == null
       );
     };
-    const r = await get().loadHistoryTo(from, { pageBars: runPageBars(s0.timeframe, from, s0.candles[0].time) });
+    const r =
+      from == null
+        ? await get().loadHistoryTo(-Infinity, { pageBars: MAX_BARS, run: true })
+        : await get().loadHistoryTo(from, { pageBars: runPageBars(s0.timeframe, from, s0.candles[0].time), run: true });
     if (!same() || r === 'error') return { ok: false, extended: false };
     return { ok: true, extended: true }; // covered, the history start, or the cap on an unchanged chart
   };
@@ -369,8 +535,9 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
 
   /** The chart's market for a Pine run, with the Build setting so other timeframes are asked for the same way as the chart's. */
   const pineMarket = (): PineMarket => {
-    const m = marketOf(get(), env.datasets());
-    return m.dataset || !sourceOpt(getProvider(m.providerId)).source ? m : { ...m, source: 'built' };
+    const m0 = marketOf(get(), env.datasets());
+    const m: PineMarket = m0.dataset || !sourceOpt(getProvider(m0.providerId)).source ? m0 : { ...m0, source: 'built' };
+    return env.pineHigherBars() === 'finished' ? { ...m, higherBars: 'finished' } : m;
   };
 
   /* ---- Pine runs: one at a time per indicator, results from superseded runs dropped ---- */
@@ -396,12 +563,12 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
     if (candles.length === 0) return;
     pineInflight.add(id);
     pineDirty.delete(id);
-    const { source, inputs } = { source: spec.source ?? '', inputs: spec.inputs ?? {} };
+    const { source, inputs, calculation } = { source: spec.source ?? '', inputs: spec.inputs ?? {}, calculation: spec.calculation };
     const prev = get().pineRuns[id];
     setPineRun(id, { ...prev, running: true });
     let outcome: PineRunOutcome;
     try {
-      const res = await workerCall({ type: 'pine', source, candles, inputs, market: pineMarket() });
+      const res = await workerCall({ type: 'pine', source, candles, inputs, market: pineMarket(), ...(calculation && { calculation }) });
       outcome =
         res.type === 'pineResult' ? res.outcome : { ok: false, error: { message: 'Unexpected worker reply' } };
     } catch (err) {
@@ -422,6 +589,7 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
         now &&
         (now.source ?? '') === source &&
         sameInputs(now.inputs ?? {}, inputs) &&
+        sameInputs({ ...now.calculation }, { ...calculation }) &&
         runIsPrefixOf(candles, get().candles)
       ) {
         setPineRun(id, { running: true, result: outcome, candles });
@@ -450,6 +618,8 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
   const setCandles = (candles: Candle[], dataLabel: string, activeDatasetId: string | null) => {
     dropReplay();
     if (activeDatasetId != null && (get().live || liveHandle)) stopLive(); // a local dataset never streams
+    const keepResults = restoredBeforeBars && get().candles.length === 0;
+    restoredBeforeBars = false;
     set({
       candles,
       chartRange: null,
@@ -460,9 +630,7 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
       dataLabel,
       activeDatasetId,
       loadState: 'ready',
-      btResult: null,
-      btError: null,
-      optResult: null,
+      ...(keepResults ? {} : { btResult: null, btError: null, optResult: null }),
       historyStart: false,
       olderLoading: false,
     });
@@ -608,7 +776,7 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
     });
   };
 
-  return {
+  const state: ChartState = {
     id,
     ...initial,
     pineRuns: {},
@@ -714,11 +882,11 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
       }
     },
 
-    loadOlder(pageBars) {
+    loadOlder(pageBars, opts) {
       if (olderInflight) return olderInflight;
       const s = get();
       if (
-        env.historyLoading() !== 'scroll' ||
+        (env.historyLoading() !== 'scroll' && !opts?.run) ||
         s.historyStart ||
         s.activeDatasetId != null ||
         s.chartRange != null ||
@@ -768,7 +936,7 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
           env.pushMessage(
             provider.name,
             'warning',
-            `Older bars for ${symbol} ${timeframe} could not be loaded (${err instanceof Error ? err.message : String(err)}). Scroll back again to retry.`,
+            `Older bars for ${symbol} ${timeframe} could not be loaded (${err instanceof Error ? err.message : String(err)}).${opts?.run ? '' : ' Scroll back again to retry.'}`,
           );
           return 'error';
         } finally {
@@ -787,7 +955,7 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
         const { candles } = get();
         if (candles.length === 0) return 'skipped';
         if (candles[0].time <= time) return 'covered';
-        const r = await get().loadOlder(opts?.pageBars);
+        const r = await get().loadOlder(opts?.pageBars, { run: opts?.run });
         if (r !== 'loaded') return r;
       }
     },
@@ -867,7 +1035,7 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
     },
 
     addIndicator(kind) {
-      const indicators = [...get().indicators, defaultIndicator(kind)];
+      const indicators = [...get().indicators, defaultIndicator(kind, env.indicatorDefault?.(kind))];
       set({ indicators });
       env.onPrefsChange();
       const id = indicators[indicators.length - 1].id;
@@ -889,21 +1057,67 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
       set({
         indicators: get().indicators.map((i) =>
           i.id === id
-            ? {
+            ? withoutEmptyHideOn({
                 ...i,
                 ...patch,
                 params: { ...i.params, ...(patch.params ?? {}) },
                 ...(i.kind === 'pine' && { inputs: { ...(i.inputs ?? {}), ...(patch.inputs ?? {}) } }),
-              }
+                ...(i.kind === 'pine' && (i.calculation || patch.calculation) && { calculation: { ...i.calculation, ...patch.calculation } }),
+              })
             : i,
         ),
       });
       env.onPrefsChange();
-      if (patch.source !== undefined || patch.inputs !== undefined || patch.visible === true) schedulePine(id);
+      if (patch.source !== undefined || patch.inputs !== undefined || patch.calculation !== undefined || patch.visible === true) schedulePine(id);
+    },
+
+    restoreIndicator(id, spec) {
+      const before = get().indicators.find((i) => i.id === id);
+      if (!before) return;
+      const next = withoutEmptyHideOn({ ...spec, id });
+      set({ indicators: get().indicators.map((i) => (i.id === id ? next : i)) });
+      env.onPrefsChange();
+      const same = (a: object | undefined, b: object | undefined) => JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
+      if (next.kind === 'pine' && (next.source !== before.source || !same(next.inputs, before.inputs) || !same(next.calculation, before.calculation) || next.visible !== before.visible)) schedulePine(id);
+    },
+
+    setPineDraft(id, text) {
+      set({
+        indicators: get().indicators.map((i) => {
+          if (i.id !== id || i.kind !== 'pine') return i;
+          const { draft: _drop, ...rest } = i;
+          return text === (i.source ?? '') ? rest : { ...rest, draft: text };
+        }),
+      });
+      env.onPrefsChange();
+    },
+
+    applyPineDraft(id) {
+      const cur = get().indicators.find((i) => i.id === id);
+      if (!cur || cur.kind !== 'pine' || cur.draft === undefined) return;
+      const draft = cur.draft;
+      set({
+        indicators: get().indicators.map((i) => {
+          if (i.id !== id) return i;
+          const { draft: _drop, ...rest } = i;
+          return { ...rest, source: draft };
+        }),
+      });
+      env.onPrefsChange();
+      schedulePine(id);
+    },
+
+    rerunPine() {
+      schedulePineAll();
     },
 
     setShowTrades(v) {
       set({ showTrades: v });
+      env.onPrefsChange();
+    },
+
+    setPriceScaleMode(mode) {
+      set({ priceScaleMode: mode });
       env.onPrefsChange();
     },
 
@@ -1111,17 +1325,27 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
         env.pushToast('error', 'Load some data before running a backtest.');
         return;
       }
+      const exitsError = exitsProblem(btConfig);
+      if (exitsError) {
+        env.pushToast('error', exitsError);
+        return;
+      }
       let loadedHistory = false;
-      if (btRange.from != null && runNeedsHistory(btRange)) {
+      if (runNeedsHistory(btRange)) {
         set({ btRunning: true, btProgress: 0, btStage: 'history', btError: null });
         const h = await loadRunHistory(btRange.from);
         if (!h.ok) {
           set({ btRunning: false, btProgress: 0, btStage: null });
-          env.pushToast('error', `Backtest could not load history from ${fmtTime(btRange.from, { timeZone: env.timeZone() })}`);
+          env.pushToast(
+            'error',
+            btRange.from == null
+              ? 'Backtest could not load the full history'
+              : `Backtest could not load history from ${fmtTime(btRange.from, { timeZone: env.timeZone() })}`,
+          );
           return;
         }
         loadedHistory = true;
-        requestRunView(btRange.from);
+        if (btRange.from != null) requestRunView(btRange.from);
       }
       const { slice: candles, error } = describeTimeRange(selectBars(get()), btRange);
       if (error) {
@@ -1132,20 +1356,34 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
       set({ btRunning: true, btProgress: 0, btStage: null, btError: null });
       try {
         const t0 = performance.now();
-        const msg = await workerCall({ type: 'run', candles, config: { ...btConfig, market: pineMarket() } }, (pct, stage) =>
-          set({ btProgress: pct, btStage: stage ?? null }),
+        let jobId: string | null = null;
+        const config = { ...(btConfig.pineRoles?.length ? await withRoleSources(btConfig) : btConfig), market: pineMarket() };
+        const job = runJob(
+          env.jobPlace(),
+          id0,
+          { type: 'run', candles, config },
+          (pct, stage) => set({ btProgress: pct, btStage: stage ?? null }),
+          {
+            record: { symbol: get().symbol, timeframe: get().timeframe, strategyId: btConfig.strategyId },
+            onStarted: (j) => void (jobId = j.id),
+            onFallback: serverNotice('Backtest'),
+          },
         );
+        const msg = await job.promise;
         if (msg.type !== 'result') throw new Error('Unexpected worker reply');
         const ms = Math.round(performance.now() - t0);
+        const atLimit = btRange.from == null && atHistoryLimitOf(get());
+        btRun = job.place() === 'server' && jobId ? { result: msg.result, id: jobId } : null;
         set({ btResult: msg.result, btRunning: false, btProgress: 0, btStage: null });
         env.pushToast(
           'success',
-          `Backtest finished in ${ms} ms — ${msg.result.trades.length} trade(s), ${candles.length} bars.`,
+          `Backtest finished ${ranWhere(job)} in ${ms} ms — ${msg.result.trades.length} trade(s), ${atLimit ? candles.length.toLocaleString('en-US') : candles.length} bars${atLimit ? ` (the ${HISTORY_MAX_BARS.toLocaleString('en-US')}-bar history limit)` : ''}.${autoNote(job)}`,
         );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        set({ btRunning: false, btProgress: 0, btStage: null, btError: message });
-        env.pushToast('error', `Backtest failed: ${message}`);
+        const restarted = err instanceof ServerRestartedError;
+        set({ btRunning: false, btProgress: 0, btStage: null, btError: restarted ? null : message });
+        env.pushToast('error', restarted ? message : `Backtest failed: ${message}`);
       }
     },
 
@@ -1186,12 +1424,19 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
       const token = ++mcToken;
       set({ mcRunning: true, mcError: null });
       try {
-        const msg = await workerCall({
-          type: 'montecarlo',
-          trades: source.trades,
-          initialCapital: source.metrics.initialCapital,
-          options,
-        });
+        const t0 = performance.now();
+        const sourceRunId = shownRunId();
+        const job = runJob(
+          env.jobPlace(),
+          id0,
+          { type: 'montecarlo', trades: source.trades, initialCapital: source.metrics.initialCapital, options },
+          undefined,
+          {
+            record: { symbol: get().symbol, timeframe: get().timeframe, strategyId: source.config.strategyId, options, ...(sourceRunId && { sourceRunId }) },
+            onFallback: serverNotice('Backtest'),
+          },
+        );
+        const msg = await job.promise;
         if (msg.type !== 'monteCarloResult') throw new Error('Unexpected worker reply');
         if (token !== mcToken) return;
         // The backtest was replaced while this ran: the result belongs to a run that is gone.
@@ -1200,6 +1445,9 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
           return;
         }
         set({ mcResult: { source, result: msg.result, options }, mcRunning: false });
+        if (job.place() === 'server' || job.auto || job.unmeasured) {
+          env.pushToast('success', `Monte Carlo finished ${ranWhere(job)} in ${Math.round(performance.now() - t0)} ms.${autoNote(job)}`);
+        }
       } catch (err) {
         if (token !== mcToken) return;
         set({ mcRunning: false, mcError: err instanceof Error ? err.message : String(err) });
@@ -1217,9 +1465,14 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
         env.pushToast('error', 'Load some data before optimizing.');
         return;
       }
+      const exitsError = exitsProblem(btConfig);
+      if (exitsError) {
+        env.pushToast('error', exitsError);
+        return;
+      }
       const previous = optRun ? optRun.previous : get().optResult;
       let loading: NonNullable<typeof optRun> | null = null;
-      if (btRange.from != null && runNeedsHistory(btRange)) {
+      if (runNeedsHistory(btRange)) {
         optRun?.cancel();
         const pending = { cancel: () => {}, previous };
         loading = pending;
@@ -1230,11 +1483,16 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
         if (!h.ok) {
           optRun = null;
           set({ optRunning: false, optStage: null, optResult: previous });
-          env.pushToast('error', `Optimizer could not load history from ${fmtTime(btRange.from, { timeZone: env.timeZone() })}`);
+          env.pushToast(
+            'error',
+            btRange.from == null
+              ? 'Optimizer could not load the full history'
+              : `Optimizer could not load history from ${fmtTime(btRange.from, { timeZone: env.timeZone() })}`,
+          );
           return;
         }
         set({ optStage: null });
-        requestRunView(btRange.from);
+        if (btRange.from != null) requestRunView(btRange.from);
       }
       const abandon = () => {
         if (!loading) return;
@@ -1267,10 +1525,12 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
         bars: candles.length,
         initialCapital: btConfig.initialCapital,
         positionSizePct: btConfig.positionSizePct,
+        ...(btConfig.riskPct != null && { riskPct: btConfig.riskPct }),
         feeBps: btConfig.feeBps,
         slippageBps: btConfig.slippageBps,
         stopLossPct: btConfig.stopLossPct,
         takeProfitPct: btConfig.takeProfitPct,
+        ...exitContext(btConfig),
         allowShort: btConfig.allowShort,
         sweeps: optConfig.sweeps.map((sw) => ({ ...sw })),
       };
@@ -1291,11 +1551,30 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
         }));
         context.walkForward = { method: 'walk-forward', windows: v.windows, inSamplePct: v.inSamplePct, anchored: v.anchored, spans };
       }
+      let sent = btConfig;
+      if (btConfig.pineRoles?.length) {
+        // Only a run with indicator roles waits here, so every other run starts in the same tick as before.
+        try {
+          sent = await withRoleSources(btConfig);
+        } catch (err) {
+          abandon();
+          env.pushToast('error', `Optimizer failed: ${err instanceof Error ? err.message : String(err)}`);
+          return;
+        }
+      }
+      const config = { ...sent, market: pineMarket() };
       optRun?.cancel();
       set({ optRunning: true, optProgress: 0, optResult: null });
-      const call = optimizerCall({ type: 'optimize', candles, config: { ...btConfig, market: pineMarket() }, optimize: optConfig }, (pct) => {
-        if (optRun === run) set({ optProgress: pct });
-      });
+      const t0 = performance.now();
+      const call = runOptimizerJob(
+        env.jobPlace(),
+        id0,
+        { type: 'optimize', candles, config, optimize: optConfig },
+        (pct) => {
+          if (optRun === run) set({ optProgress: pct });
+        },
+        { record: { symbol: get().symbol, timeframe: get().timeframe, strategyId: btConfig.strategyId, context }, onFallback: serverNotice('Backtest') },
+      );
       const run = { cancel: call.cancel, previous };
       optRun = run;
       try {
@@ -1308,6 +1587,9 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
           optRunning: false,
           optProgress: 1,
         });
+        if (call.place() === 'server' || call.auto || call.unmeasured) {
+          env.pushToast('success', `Optimizer finished ${ranWhere(call)} in ${Math.round(performance.now() - t0)} ms — ${msg.combos} parameter combination(s).${autoNote(call)}`);
+        }
         if (msg.errored > 0) {
           env.pushToast('error', `${msg.errored} of ${msg.combos} parameter combinations failed (see custom code).`);
         }
@@ -1315,7 +1597,7 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
         if (optRun !== run || err instanceof CancelledError) return;
         optRun = null;
         set({ optRunning: false, optResult: previous });
-        env.pushToast('error', `Optimizer failed: ${err instanceof Error ? err.message : String(err)}`);
+        env.pushToast('error', err instanceof ServerRestartedError ? err.message : `Optimizer failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
 
@@ -1362,6 +1644,9 @@ export function createChartStore(id: string, initial: ChartInitial, env: ChartEn
       }
     },
   };
+  // A server job this chart left running (or finished) when the tab closed shows up again.
+  queueMicrotask(reattachServerJobs);
+  return state;
   });
 }
 
@@ -1370,8 +1655,15 @@ export function canPageOlder(s: ChartState, mode: HistoryLoading): boolean {
   return mode === 'scroll' && !s.historyStart && s.activeDatasetId == null && s.chartRange == null && s.replay == null && s.candles.length > 0;
 }
 
-/** Whether a run over `range` must first load history: scroll mode on a live series that can page older, From set and before the first loaded bar. */
-export function runNeedsHistoryOf(s: ChartState, mode: HistoryLoading, range: TimeRange): boolean {
-  if (range.from == null || (range.to != null && range.from > range.to)) return false;
-  return canPageOlder(s, mode) && range.from < s.candles[0].time;
+/** Whether the history cap stopped the paging: a live series (no dataset, chart range or replay) at the bar cap. */
+export function atHistoryLimitOf(s: ChartState): boolean {
+  return s.activeDatasetId == null && s.chartRange == null && s.replay == null && !belowHistoryCap(s.candles.length);
+}
+
+/** Whether a run over `range` must first load history: a live series that can page older and is below the cap, with From open or before the first loaded bar. */
+export function runNeedsHistoryOf(s: ChartState, range: TimeRange): boolean {
+  if (range.from != null && range.to != null && range.from > range.to) return false;
+  if (s.historyStart || s.activeDatasetId != null || s.chartRange != null || s.replay != null || s.candles.length === 0) return false;
+  if (!belowHistoryCap(s.candles.length)) return false;
+  return range.from == null || range.from < s.candles[0].time;
 }

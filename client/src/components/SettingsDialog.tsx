@@ -1,6 +1,23 @@
+import { useState } from 'react';
 import { useStore } from '../state/store';
 import type { HistoryLoading } from '../lib/historyPaging';
+import type { JobSetting } from '../lib/benchmark';
 import { Modal } from './Modal';
+import { BenchmarkSection } from './BenchmarkSection';
+import { loadBenchmark } from '../lib/benchmark';
+
+const PINE_OPTIONS: { value: 'forming' | 'finished'; label: string; hint: string }[] = [
+  { value: 'forming', label: 'Follow the forming bar (as TradingView)', hint: 'A script that declares a higher timeframe follows its unfinished bar live.' },
+  { value: 'finished', label: 'Only finished bars (no repaint)', hint: 'A script that declares a higher timeframe uses only its finished bars, so live values match a reload.' },
+];
+
+const AUTO_NO_BENCHMARK = 'Run the benchmark to let Auto choose';
+
+const JOB_OPTIONS: { value: JobSetting; label: string; hint: string }[] = [
+  { value: 'browser', label: 'Browser', hint: 'Runs in this tab and stops when the tab closes.' },
+  { value: 'server', label: 'Server', hint: 'Keeps running when the tab closes; the result shows when you reopen the chart or the strategy maker.' },
+  { value: 'auto', label: 'Auto', hint: 'Each kind of job runs where the benchmark found it faster.' },
+];
 
 const HISTORY_OPTIONS: { value: HistoryLoading; label: string; hint: string }[] = [
   { value: 'scroll', label: 'Load as you scroll back', hint: 'Older bars load in pages as you scroll or zoom back.' },
@@ -20,6 +37,15 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const historyLoading = useStore((s) => s.historyLoading);
   const setHistoryLoading = useStore((s) => s.setHistoryLoading);
+  const barCountdown = useStore((s) => s.barCountdown);
+  const setBarCountdown = useStore((s) => s.setBarCountdown);
+  const highLowLabels = useStore((s) => s.highLowLabels);
+  const setHighLowLabels = useStore((s) => s.setHighLowLabels);
+  const pineHigherBars = useStore((s) => s.pineHigherBars);
+  const setPineHigherBars = useStore((s) => s.setPineHigherBars);
+  const jobPlace = useStore((s) => s.jobPlace);
+  const setJobPlace = useStore((s) => s.setJobPlace);
+  const [benchmark, setBenchmark] = useState(loadBenchmark);
   return (
     <Modal title="Settings" onClose={onClose} width={460}>
       <Section title="Charts">
@@ -35,6 +61,54 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             </label>
           ))}
         </fieldset>
+        <div className="settings-row">
+          <label className="settings-radio">
+            <input type="checkbox" checked={barCountdown} onChange={(e) => setBarCountdown(e.target.checked)} />
+            <span>
+              <span className="settings-radio-label">Countdown to bar close</span>
+              <span className="hint settings-radio-hint">Shows the time left in the current bar under the last price.</span>
+            </span>
+          </label>
+        </div>
+        <div className="settings-row">
+          <label className="settings-radio">
+            <input type="checkbox" checked={highLowLabels} onChange={(e) => setHighLowLabels(e.target.checked)} />
+            <span>
+              <span className="settings-radio-label">High and low price labels</span>
+              <span className="hint settings-radio-hint">Shows the highest and lowest price of the bars on screen on the price scale.</span>
+            </span>
+          </label>
+        </div>
+      </Section>
+      <Section title="Pine scripts">
+        <fieldset className="settings-row">
+          <legend>Higher timeframes on the live bar</legend>
+          {PINE_OPTIONS.map((o) => (
+            <label key={o.value} className="settings-radio">
+              <input type="radio" name="pineHigherBars" value={o.value} checked={pineHigherBars === o.value} onChange={() => setPineHigherBars(o.value)} />
+              <span>
+                <span className="settings-radio-label">{o.label}</span>
+                <span className="hint settings-radio-hint">{o.hint}</span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+      </Section>
+      <Section title="Heavy jobs">
+        <p className="hint">Chart indicators always run in the browser. On Server (or when Auto picks it), Pine and custom-code strategies run their code on the server machine.</p>
+        <fieldset className="settings-row">
+          <legend>Run backtests, optimizer, Monte Carlo and the strategy maker on</legend>
+          {JOB_OPTIONS.map((o) => (
+            <label key={o.value} className="settings-radio">
+              <input type="radio" name="jobPlace" value={o.value} checked={jobPlace === o.value} onChange={() => setJobPlace(o.value)} />
+              <span>
+                <span className="settings-radio-label">{o.label}</span>
+                <span className="hint settings-radio-hint">{o.value === 'auto' && !benchmark ? AUTO_NO_BENCHMARK : o.hint}</span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+        <BenchmarkSection doc={benchmark} onDoc={setBenchmark} />
       </Section>
     </Modal>
   );

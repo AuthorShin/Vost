@@ -7,11 +7,11 @@ import type { ExitReason } from './types';
 
 export type HelpKey =
   | 'finalEquity' | 'netPnl' | 'totalReturn' | 'buyHold' | 'cagr' | 'sharpe' | 'sortino' | 'calmar'
-  | 'maxDrawdown' | 'maxDdDuration' | 'exposure' | 'trades' | 'winRate' | 'profitFactor' | 'expectancy'
-  | 'avgTrade' | 'bestWorst' | 'avgBars' | 'totalFees' | 'bars'
+  | 'maxDrawdown' | 'maxDdDuration' | 'exposure' | 'trades' | 'signals' | 'signalRate' | 'winRate' | 'profitFactor' | 'expectancy'
+  | 'avgTrade' | 'bestWorst' | 'avgBars' | 'totalFees' | 'bars' | 'maxLeverage'
   | 'wins' | 'losses' | 'grossProfit' | 'grossLoss' | 'bestTrade' | 'worstTrade'
   | 'longestWinStreak' | 'longestLossStreak' | 'currentStreak'
-  | 'exitSignal' | 'exitStopLoss' | 'exitTakeProfit' | 'exitEndOfData' | 'exitShare'
+  | 'exitSignal' | 'exitStopLoss' | 'exitTrailingStop' | 'exitTakeProfit' | 'exitEndOfData' | 'exitShare'
   | 'legendStrategy' | 'legendBuyHold'
   | 'mcFinalReturn' | 'mcMaxDrawdown' | 'mcThisRun' | 'mcChanceOfLoss';
 
@@ -26,6 +26,7 @@ export interface MetricHelp {
 export const EXIT_REASON_HELP: Record<ExitReason, HelpKey> = {
   signal: 'exitSignal',
   stop_loss: 'exitStopLoss',
+  trailing_stop: 'exitTrailingStop',
   take_profit: 'exitTakeProfit',
   end_of_data: 'exitEndOfData',
 };
@@ -128,12 +129,22 @@ export const METRIC_HELP: Record<HelpKey, MetricHelp> = {
   },
   maxDdDuration: {
     label: 'Max DD duration',
-    what: 'The longest stretch, in bars, that equity stayed below an earlier peak before making a new high.',
-    reading: 'Lower is better. Compare it with the Bars figure: a duration near the whole run means equity rarely made new highs.',
+    what: 'The longest stretch that equity stayed below an earlier peak before making a new high. The card gives it in bars and as clock time in minutes, hours, days, weeks and years (only the units that fit).',
+    reading: 'Lower is better. The time is real elapsed time between the bars, so gaps such as weekends and nights count; on 24/7 data it is the bars times the timeframe. Compare it with the Bars figure: a duration near the whole run means equity rarely made new highs.',
     profit: 'Long drawdowns are long periods without profit, even if the run ends well.',
     related: [
       { key: 'maxDrawdown', note: 'the depth of the worst fall' },
       { key: 'bars', note: 'the total run length to compare with' },
+    ],
+  },
+  maxLeverage: {
+    label: 'Max leverage',
+    what: 'The largest position of the run, as a multiple of the equity at entry (entry value divided by equity). Shown only when trades are sized by risk per trade, where the position is not capped.',
+    reading: 'A tight stop makes a big position: a 0.04 percent stop with 2 percent risk is 50x. Check that a real account and exchange would allow it.',
+    profit: 'Larger positions make the same stop cost the same, but fees and gaps through the stop cost more.',
+    related: [
+      { key: 'maxDrawdown', note: 'gaps through a leveraged stop deepen drawdowns' },
+      { key: 'totalFees', note: 'fees grow with the position' },
     ],
   },
   exposure: {
@@ -153,9 +164,32 @@ export const METRIC_HELP: Record<HelpKey, MetricHelp> = {
     reading: 'More trades make the other figures more trustworthy. Under about 30, treat win rate and averages as noise.',
     profit: 'Each trade pays fees and slippage, so many small trades can cost more than they earn.',
     related: [
+      { key: 'signals', note: 'signals that fired; trades are the ones actually taken' },
       { key: 'totalFees', note: 'rises with the trade count' },
       { key: 'winRate', note: 'only reliable with enough trades' },
       { key: 'mcFinalReturn', note: 'Monte Carlo needs enough trades to be meaningful' },
+    ],
+  },
+  signals: {
+    label: 'Entry signals',
+    what: 'How many times the strategy turned to a new side (long or short) and so asked for a trade. A repeat of the side it already holds does not count.',
+    reading: 'Fewer taken than fired is normal: a stop-out blocks re-entry until the signal flips, a signal while already in that side adds nothing, and an empty account cannot open.',
+    profit: 'Signals only pay when taken; a big gap between fired and taken means the exits are cutting the strategy short.',
+    related: [
+      { key: 'trades', note: 'the signals that became trades' },
+      { key: 'signalRate', note: 'the same count per 100 bars and per day' },
+      { key: 'exitStopLoss', note: 'stop-outs block re-entry on the same side' },
+    ],
+  },
+  signalRate: {
+    label: 'Signal rate',
+    what: 'Entry signals fired per 100 bars, and per day using the bar length of the run.',
+    reading: 'Very low (under 1 per 100 bars) leaves few trades to judge; very high (over 10) often means noise and heavy fees. Compare runs on the same timeframe.',
+    profit: 'Frequent signals multiply fees and slippage; rare ones leave capital idle.',
+    related: [
+      { key: 'signals', note: 'the count behind the rate' },
+      { key: 'trades', note: 'how many were taken' },
+      { key: 'totalFees', note: 'grows with signal frequency' },
     ],
   },
   winRate: {
@@ -349,6 +383,16 @@ export const METRIC_HELP: Record<HelpKey, MetricHelp> = {
     related: [
       { key: 'exitTakeProfit', note: 'the stop and the target trade off against each other' },
       { key: 'worstTrade', note: 'the stop limits the worst loss' },
+    ],
+  },
+  exitTrailingStop: {
+    label: 'Exit by trailing stop',
+    what: 'Trades closed because price fell back (for a short, rose back) to the trailing stop. The trail follows the best price since entry at a fixed distance and never moves back. Within one bar the stop is checked before the target.',
+    reading: 'A high share with a positive net P/L means the trail is locking in gains. A high share with a negative net P/L means the trail is too tight for the market noise.',
+    profit: 'Lets winners run while capping the give-back, but a tight trail can cut a trade that would have continued.',
+    related: [
+      { key: 'exitStopLoss', note: 'the fixed stop that sits below the trail at first' },
+      { key: 'exitTakeProfit', note: 'a fixed target instead of a moving stop' },
     ],
   },
   exitTakeProfit: {

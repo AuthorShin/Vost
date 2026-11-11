@@ -6,9 +6,10 @@
  * (right for every crypto provider, not for stocks) and `syminfo.mintick` is estimated from the prices.
  */
 import type { IProvider, ISymbolInfo } from 'pinets';
-import { intervalSeconds, parseInterval, type Interval } from '../../../../shared/market';
+import { intervalSeconds, MAX_BARS, parseInterval, type Interval } from '../../../../shared/market';
 import { PROVIDER_CATALOG } from '../../../../shared/providerCatalog';
 import { buildBars } from '../../../../shared/timeframes';
+import { barSeconds } from '../backtest/higherTimeframe';
 import type { Candle } from '../../types';
 import { getProvider } from '../providers';
 import { defaultMarketFeed, intervalEndMs, type MarketFeed } from './marketFeed';
@@ -37,16 +38,6 @@ export function pineTimeframeOfSeconds(seconds: number): string {
   return String(Math.max(1, Math.round(s / 60)));
 }
 
-/** Bar length in seconds of the candles themselves: the smallest gap among the first bars. */
-function spacingSeconds(candles: Candle[]): number {
-  let best = Infinity;
-  for (let i = 1; i < Math.min(candles.length, 200); i++) {
-    const g = candles[i].time - candles[i - 1].time;
-    if (g > 0 && g < best) best = g;
-  }
-  return Number.isFinite(best) ? best : 86400;
-}
-
 /** The Pine timeframe a run uses: the market's interval, else its bar length, else the candle spacing. */
 export function marketTimeframe(market: PineMarket | undefined, candles: Candle[]): string {
   if (market?.interval) {
@@ -54,7 +45,7 @@ export function marketTimeframe(market: PineMarket | undefined, candles: Candle[
     if (tf) return tf;
   }
   if (market?.barSeconds && market.barSeconds > 0) return pineTimeframeOfSeconds(market.barSeconds);
-  return pineTimeframeOfSeconds(spacingSeconds(candles));
+  return pineTimeframeOfSeconds(barSeconds(candles));
 }
 
 /** Compares timeframes by meaning ("D" and "1D" are the same). */
@@ -225,7 +216,9 @@ export function createMarketProvider(
     const from = Math.min(startMs, candles[0].time * 1000);
     if (wantMs < chartMs) {
       if (m.dataset) throw new Error(`the imported data has ${tf} bars and cannot give lower ones`);
-      const bars = await feed.bars({ providerId: m.providerId, symbol: m.symbol, interval, ...(m.source && { source: m.source }), fromMs: from, toMs: endTime });
+      // The newest bars that fit in one request; older chart bars get no value.
+      const lowFrom = Math.max(from, endTime - (MAX_BARS - 1) * wantMs);
+      const bars = await feed.bars({ providerId: m.providerId, symbol: m.symbol, interval, ...(m.source && { source: m.source }), fromMs: lowFrom, toMs: endTime });
       return bars.map((c) => kline(c, intervalEndMs(c.time * 1000, interval) - 1)).filter((k) => k.closeTime <= endTime);
     }
     if (m.dataset) {

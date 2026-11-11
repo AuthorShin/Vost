@@ -1,4 +1,5 @@
 import type { Scenario } from '../scenario.ts';
+import { indicatorLegend } from './indicator-legend.ts';
 import { alerts } from './alerts.ts';
 import { customTimeframe } from './custom-timeframe.ts';
 import { builtTimeframe } from './built-timeframe.ts';
@@ -9,9 +10,11 @@ import { chartPan } from './chart-pan.ts';
 import { chartPanes } from './chart-panes.ts';
 import { btProgress } from './bt-progress.ts';
 import { btRange } from './bt-range.ts';
+import { btPineRole } from './bt-pine-role.ts';
 import { btResults } from './bt-results.ts';
 import { chartRange } from './chart-range.ts';
 import { chartReset } from './chart-reset.ts';
+import { symbolView } from './symbol-view.ts';
 import { drawingChannels } from './drawing-channels.ts';
 import { drawingCycles } from './drawing-cycles.ts';
 import { drawingPitchforks } from './drawing-pitchforks.ts';
@@ -38,13 +41,22 @@ import { drawingVolume } from './drawing-volume.ts';
 import { drawingText } from './drawing-text.ts';
 import { drawings } from './drawings.ts';
 import { drawingSettings } from './drawing-settings.ts';
+import { indicatorSettings } from './indicator-settings.ts';
 import { compare } from './compare.ts';
+import { strategyMaker } from './strategy-maker.ts';
+import { strategyMakerServer } from './strategy-maker-server.ts';
+import { strategySearch } from './strategy-search.ts';
 import { connStatus } from './conn-status.ts';
+import { barCountdown } from './bar-countdown.ts';
+import { benchmark } from './benchmark.ts';
+import { priceScale } from './price-scale.ts';
+import { highLow } from './high-low.ts';
 import { zoneClock } from './zone-clock.ts';
 import { layouts } from './layouts.ts';
 import { networkAudit } from './network-audit.ts';
 import { paneResize } from './pane-resize.ts';
 import { pineConvert } from './pine-convert.ts';
+import { pineIndicators } from './pine-indicators.ts';
 import { pineLibraries } from './pine-libraries.ts';
 import { pineDrawings } from './pine-drawings.ts';
 import { pinePane } from './pine-pane.ts';
@@ -55,11 +67,14 @@ import { responsive } from './responsive.ts';
 import { monteCarlo } from './monte-carlo.ts';
 import { optimizer } from './optimizer.ts';
 import { outage } from './outage.ts';
+import { serverJobs } from './server-jobs.ts';
+import { serverSettings } from './server-settings.ts';
+import { topbar } from './topbar.ts';
 import { uiAudit } from './ui-audit.ts';
 import { watchlist } from './watchlist.ts';
 
 // Add a scenario: create a file in this folder and list it here.
-const all: Scenario[] = [alerts, drawingBars, btProgress, btRange, btResults, builtTimeframe, chart, chartHistory, chartPan, chartPanes, chartRange, chartReset, compare, connStatus, customTimeframe, drawingChannels, drawingCycles, drawingElliott, drawingFib, drawingFibTrend, drawingForecast, drawingGann, drawingIcons, drawingImage, drawingPitchforks, drawingLines, drawingManage, drawingNotes, drawingPatterns, drawingPositions, drawingPriceMarkers, drawingRail, drawingRanges, drawingShapes, drawingTable, drawingText, drawingToolbar, drawingVolume, drawings, drawingSettings, layouts, monteCarlo, networkAudit, optimizer, outage, paneResize, pineConvert, pineDrawings, pineLibraries, pinePane, pineRender, pineSecurity, replay, responsive, settings, uiAudit, watchlist, zoneClock];
+const all: Scenario[] = [alerts, barCountdown, benchmark, highLow, drawingBars, btPineRole, btProgress, btRange, btResults, builtTimeframe, chart, chartHistory, chartPan, chartPanes, chartRange, chartReset, compare, connStatus, customTimeframe, drawingChannels, drawingCycles, drawingElliott, drawingFib, drawingFibTrend, drawingForecast, drawingGann, drawingIcons, drawingImage, drawingPitchforks, drawingLines, drawingManage, drawingNotes, drawingPatterns, drawingPositions, drawingPriceMarkers, drawingRail, drawingRanges, drawingShapes, drawingTable, drawingText, drawingToolbar, drawingVolume, drawings, drawingSettings, indicatorLegend, indicatorSettings, layouts, monteCarlo, networkAudit, optimizer, outage, paneResize, pineConvert, pineDrawings, pineIndicators, pineLibraries, pinePane, pineRender, pineSecurity, priceScale, replay, responsive, serverJobs, serverSettings, settings, strategyMaker, strategyMakerServer, strategySearch, symbolView, topbar, uiAudit, watchlist, zoneClock];
 
 
 export const scenarios = new Map<string, Scenario>();

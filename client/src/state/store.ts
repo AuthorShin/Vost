@@ -12,11 +12,12 @@ import { uid } from '../types';
 import { appendMessage, markAllRead, type InboxMessage, type MessageSeverity } from '../lib/messages';
 import { sourceBase } from '../../../shared/timeframes.ts';
 import { getProvider, providers, type SymbolSuggestion } from '../lib/providers';
-import { loadJson, saveJson, debounce, removeKey } from '../lib/storage';
+import { loadJson, saveJson, debounce, removeKey, flushStorage, onStorageOutage, takeMigrationNotice } from '../lib/storage';
 import { browserTimeZone, isValidTimeZone } from '../lib/time';
 import type { SyncChange } from '../lib/layoutSync';
 import { sanitizeTimeRange } from '../lib/timeRange';
 import * as wl from '../lib/watchlist';
+import { sanitizePriceScaleMode } from '../lib/priceScaleMode';
 import { DOCK_DEFAULT, PINE_DEFAULT, SIDEBAR_DEFAULT, sanitizeStoredSize } from '../lib/paneSizes';
 import {
   DEFAULT_ARRANGEMENT_ID,
@@ -36,8 +37,12 @@ import {
 import type { HistoryLoading } from '../lib/historyPaging';
 import * as sl from '../lib/savedLayouts';
 import { createChartStore, defaultChartInitial, type ChartEnv, type ChartInitial, type ChartStore } from './chart';
-import type { IndicatorSpec } from '../lib/indicatorCompute';
+import type { IndicatorDefault, IndicatorKind, IndicatorSpec } from '../lib/indicatorCompute';
+import { cleanIndicatorDefault, sanitizeIndicatorDefaults, sanitizeIndicatorSpecs } from '../lib/indicatorSettings';
 import type { BacktestConfig } from '../lib/backtest/types';
+import { sanitizePineRoles, withoutSources } from '../lib/backtest/pineRole';
+import { handoffSettingsText, type Handoff } from '../lib/backtestHandoff';
+import { DEFAULT_PARAMS, getStrategy } from '../lib/backtest/strategies';
 import type { Interval } from '../types';
 import { servable, MAX_CUSTOM_TIMEFRAMES, sanitizeCustomTimeframes } from '../lib/customTimeframes';
 import { sanitizeArmed, sanitizeRecent, withRecent } from '../lib/iconSets/prefs';
@@ -46,6 +51,7 @@ import { sanitizeDefaults } from '../lib/drawingStyle';
 import { toolSettings } from '../components/chart/tools';
 import { canonicalInterval } from '../../../shared/market.ts';
 import type { TimeRange } from '../lib/timeRange';
+import { sanitizeJobSetting, type JobSetting } from '../lib/benchmark';
 
 
 export interface Toast {
@@ -72,6 +78,7 @@ interface Prefs {
   showTrades: boolean;
   timeZone?: string;
   btRange?: TimeRange;
+  priceScaleMode?: unknown;
   sidebarWidth?: number;
   pineWidth?: number;
   dockHeight?: number;
@@ -84,6 +91,8 @@ interface Prefs {
   drawingsHidden?: boolean;
   /** The style new drawings of a tool start with, per tool id (see lib/drawingStyle). */
   drawingDefaults?: Record<string, Record<string, unknown>>;
+  /** The params and hidden timeframe kinds a new indicator of a kind starts with, per kind (see lib/indicatorSettings). */
+  indicatorDefaults?: Record<string, IndicatorDefault>;
   drawingFavorites?: string[];
   drawingLastTool?: Record<string, string>;
   glyphArmed?: Record<string, string>;
@@ -92,6 +101,10 @@ interface Prefs {
   favoritesBarPos?: BarPos;
   buildTimeframes?: boolean;
   historyLoading?: HistoryLoading;
+  barCountdown?: boolean;
+  highLowLabels?: boolean;
+  pineHigherBars?: 'forming' | 'finished';
+  jobPlace?: JobSetting;
   customTimeframes?: Interval[];
 }
 
@@ -115,6 +128,14 @@ const defaultPrefs: Prefs = {
   showTrades: defaultChart.showTrades,
 };
 
+/** A saved config's TradingView indicator roles: malformed ones dropped, and no source is ever kept. */
+function sanitizeBtRoles(config: BacktestConfig): BacktestConfig {
+  if (config.pineRoles === undefined) return config;
+  const roles = withoutSources(sanitizePineRoles(config.pineRoles)) ?? [];
+  const { pineRoles: _drop, ...rest } = config;
+  return roles.length > 0 ? { ...rest, pineRoles: roles } : rest;
+}
+
 /** A chart's starting state from a saved record (`prefs.v1`, or one chart of `layout.v1`); bad fields fall back. */
 function chartInitialFrom(p: Partial<Prefs>): ChartInitial {
   // A chart left on a provider that is gone opens on the default market, not on a fallback with the old symbol.
@@ -124,10 +145,11 @@ function chartInitialFrom(p: Partial<Prefs>): ChartInitial {
     symbol: known ? (p.symbol ?? defaultPrefs.symbol) : defaultPrefs.symbol,
     timeframe: known ? (typeof p.timeframe === 'string' && canonicalInterval(p.timeframe) === p.timeframe ? p.timeframe : defaultPrefs.timeframe) : defaultPrefs.timeframe,
     bars: p.bars ?? defaultPrefs.bars,
-    indicators: Array.isArray(p.indicators) && p.indicators.length > 0 ? p.indicators : defaultPrefs.indicators,
-    btConfig: { ...defaultPrefs.btConfig, ...(p.btConfig ?? {}) },
+    indicators: Array.isArray(p.indicators) && p.indicators.length > 0 ? sanitizeIndicatorSpecs(p.indicators) : defaultPrefs.indicators,
+    btConfig: sanitizeBtRoles({ ...defaultPrefs.btConfig, ...(p.btConfig ?? {}) }),
     showTrades: p.showTrades ?? true,
     btRange: sanitizeTimeRange(p.btRange),
+    priceScaleMode: sanitizePriceScaleMode(p.priceScaleMode),
   };
 }
 
@@ -152,6 +174,7 @@ export function layoutSnapshot(s: Pick<AppState, 'arrangementId' | 'activeChartI
         btConfig: c.btConfig,
         showTrades: c.showTrades,
         btRange: c.btRange,
+        ...(c.priceScaleMode === 'linear' ? {} : { priceScaleMode: c.priceScaleMode }),
       };
     }),
     sizes: s.layoutSizes,
@@ -162,7 +185,7 @@ export function layoutSnapshot(s: Pick<AppState, 'arrangementId' | 'activeChartI
 export interface AppState {
   /** IANA zone every date on screen is shown in (candle times stay UTC). */
   timeZone: string;
-  /** Bottom dock UI state (not persisted). */
+  /** Bottom dock UI state (not persisted); the dock starts collapsed on every load. */
   dockTab: DockTab;
   dockCollapsed: boolean;
   /** Whether the Pine editor pane is open (not persisted). */
@@ -183,6 +206,8 @@ export interface AppState {
   drawingStayMode: boolean;
   drawingsHidden: boolean;
   drawingDefaults: Record<string, Record<string, unknown>>;
+  /** The saved starting params and hidden timeframe kinds of a new indicator, per built-in kind. */
+  indicatorDefaults: Record<string, IndicatorDefault>;
   /** Rail entry keys (see lib/drawingRail.ts) the person starred, in the order the favourites bar shows them. */
   drawingFavorites: string[];
   /** The last entry used from each rail family, shown on the family's button. */
@@ -199,6 +224,14 @@ export interface AppState {
   buildTimeframes: boolean;
   /** How a chart's history loads: the latest page and older pages on scroll, or everything at once. */
   historyLoading: HistoryLoading;
+  /** Show the time left in the last bar under the last price. */
+  barCountdown: boolean;
+  /** Show High and Low labels on the price scale for the bars on screen. */
+  highLowLabels: boolean;
+  /** Pine: whether the live bar sees the forming higher-timeframe bar or only finished ones. */
+  pineHigherBars: 'forming' | 'finished';
+  /** Where backtests, optimizer runs and Monte Carlo runs run: in this tab or on the server. */
+  jobPlace: JobSetting;
   /** Intervals the person added from the timeframe picker (canonical, at most 20; one list for the whole app). */
   customTimeframes: Interval[];
 
@@ -274,11 +307,17 @@ export interface AppState {
   /** Turns building higher timeframes from lower ones on or off; reloads every remote chart whose source changes. */
   setBuildTimeframes(v: boolean): void;
   setHistoryLoading(v: HistoryLoading): void;
+  setBarCountdown(v: boolean): void;
+  setHighLowLabels(v: boolean): void;
+  setPineHigherBars(v: 'forming' | 'finished'): void;
+  setJobPlace(v: JobSetting): void;
   /** Saves a custom interval (canonical form assumed); a duplicate or a full list is a no-op. */
   addCustomTimeframe(iv: Interval): void;
   /** Forgets a custom interval and moves every chart showing it to its provider's default timeframe. */
   removeCustomTimeframe(iv: Interval): void;
   setDockTab(tab: DockTab): void;
+  /** Fills the active chart's Backtest tab from a strategy maker hand-off and shows the tab. It does not run the backtest. */
+  applyBacktestHandoff(h: Handoff): void;
   setDockCollapsed(collapsed: boolean): void;
   setSidebarWidth(px: number): void;
   setPineWidth(px: number): void;
@@ -297,6 +336,8 @@ export interface AppState {
   setDrawingsHidden(v: boolean): void;
   /** Saves (or with null clears) the style new drawings of a tool start with. */
   setDrawingDefault(tool: string, style: Record<string, unknown> | null): void;
+  /** Saves (or with null clears) what a new indicator of a built-in kind starts with. */
+  setIndicatorDefault(kind: IndicatorKind, value: IndicatorDefault | null): void;
   toggleDrawingFavorite(key: string): void;
   setDrawingLastTool(group: string, key: string): void;
   /** Arms a glyph tool with an entry and adds it to the tool's recent picks. */
@@ -333,6 +374,7 @@ export const useStore = create<AppState>()((set, get) => {
       showTrades: c.showTrades,
       timeZone: s.timeZone,
       btRange: c.btRange,
+      priceScaleMode: c.priceScaleMode,
       sidebarWidth: s.sidebarWidth,
       pineWidth: s.pineWidth,
       dockHeight: s.dockHeight,
@@ -344,6 +386,7 @@ export const useStore = create<AppState>()((set, get) => {
       drawingStayMode: s.drawingStayMode,
       drawingsHidden: s.drawingsHidden,
       drawingDefaults: s.drawingDefaults,
+      indicatorDefaults: s.indicatorDefaults,
       drawingFavorites: s.drawingFavorites,
       drawingLastTool: s.drawingLastTool,
       glyphArmed: s.glyphArmed,
@@ -352,6 +395,10 @@ export const useStore = create<AppState>()((set, get) => {
       favoritesBarPos: s.favoritesBarPos,
       buildTimeframes: s.buildTimeframes,
       historyLoading: s.historyLoading,
+      barCountdown: s.barCountdown,
+      highLowLabels: s.highLowLabels,
+      pineHigherBars: s.pineHigherBars,
+      jobPlace: s.jobPlace,
       customTimeframes: s.customTimeframes,
     } satisfies Prefs);
   }, 400);
@@ -386,6 +433,8 @@ export const useStore = create<AppState>()((set, get) => {
     writeLayout();
   };
 
+  let stopOutageWatch: (() => void) | undefined;
+
   const persistWatchlists = debounce(() => {
     wl.saveWatchlists(get().watchlists);
   }, 400);
@@ -394,7 +443,7 @@ export const useStore = create<AppState>()((set, get) => {
     const datasets = get().datasets;
     const res = saveJson(DATASETS_KEY, datasets);
     if (!res.ok) {
-      get().pushToast('error', 'Browser storage full — dataset kept in memory only.');
+      get().pushToast('error', 'The server could not store the dataset - it is kept in memory only.');
     }
   }, 600);
 
@@ -463,10 +512,13 @@ export const useStore = create<AppState>()((set, get) => {
     timeZone: () => get().timeZone,
     buildTimeframes: () => get().buildTimeframes,
     historyLoading: () => get().historyLoading,
+    pineHigherBars: () => get().pineHigherBars,
+    jobPlace: () => get().jobPlace,
+    indicatorDefault: (kind) => get().indicatorDefaults[kind] ?? null,
     datasets: () => get().datasets,
     addDataset(dataset) {
       if (JSON.stringify(dataset).length > MAX_PERSISTED_DATASETS_BYTES) {
-        get().pushToast('error', 'Dataset too large to persist in the browser (kept for this session only).');
+        get().pushToast('error', 'Dataset too large to save on the server (kept for this session only).');
         set({ datasets: [...get().datasets, dataset] });
         return;
       }
@@ -523,7 +575,7 @@ export const useStore = create<AppState>()((set, get) => {
   return {
     timeZone: browserTimeZone(),
     dockTab: 'backtest',
-    dockCollapsed: false,
+    dockCollapsed: true,
     sidebarWidth: SIDEBAR_DEFAULT,
     pineWidth: PINE_DEFAULT,
     pineOpen: false,
@@ -536,6 +588,7 @@ export const useStore = create<AppState>()((set, get) => {
     drawingStayMode: false,
     drawingsHidden: false,
     drawingDefaults: {},
+    indicatorDefaults: {},
     drawingFavorites: [],
     drawingLastTool: {},
     glyphArmed: {},
@@ -544,6 +597,10 @@ export const useStore = create<AppState>()((set, get) => {
     favoritesBarPos: { ...DEFAULT_BAR_POS },
     buildTimeframes: false,
     historyLoading: 'scroll',
+    barCountdown: true,
+    highLowLabels: true,
+    pineHigherBars: 'forming',
+    jobPlace: 'browser',
     customTimeframes: [],
     charts: firstCharts,
     activeChartId: FIRST_CHART_ID,
@@ -604,9 +661,22 @@ export const useStore = create<AppState>()((set, get) => {
       writeLayout.flush();
       persistWatchlists.flush();
       persistDatasets.flush();
+      flushStorage();
     },
 
     init() {
+      // Saves that cannot reach the server: one error toast (and so one inbox message) per outage, one info toast when it ends.
+      stopOutageWatch?.();
+      stopOutageWatch = onStorageOutage((e) => {
+        if (e.kind === 'down') get().pushToast('error', e.message);
+        else if (e.kind === 'up') get().pushToast('info', 'Settings saved again');
+        else get().pushToast('error', e.message);
+      });
+      const migrated = takeMigrationNotice();
+      if (migrated) {
+        const archived = migrated.archived > 0 ? ` Already on the server, so kept aside: ${migrated.archived}, in ${migrated.file ?? 'an import file'} in the data folder.` : '';
+        get().pushMessage('Settings', 'info', `Moved ${migrated.adopted} saved item${migrated.adopted === 1 ? '' : 's'} from this browser to the server.${archived}`);
+      }
       // The exchange symbol lists used to be cached in the browser; the server caches them now.
       for (const id of ['binance', 'coinbase', 'kraken', 'bybit', 'okx']) removeKey(`${id}.symbols.v1`);
       const prefs = loadJson<Prefs>(PREFS_KEY, defaultPrefs);
@@ -628,6 +698,7 @@ export const useStore = create<AppState>()((set, get) => {
         drawingStayMode: prefs.drawingStayMode === true,
         drawingsHidden: prefs.drawingsHidden === true,
         drawingDefaults: sanitizeDefaults(prefs.drawingDefaults, toolSettings),
+        indicatorDefaults: sanitizeIndicatorDefaults(prefs.indicatorDefaults),
         drawingFavorites: sanitizeFavorites(prefs.drawingFavorites),
         drawingLastTool: sanitizeLastTool(prefs.drawingLastTool),
         glyphArmed: sanitizeArmed(prefs.glyphArmed),
@@ -636,6 +707,10 @@ export const useStore = create<AppState>()((set, get) => {
         favoritesBarPos: sanitizeBarPos(prefs.favoritesBarPos),
         buildTimeframes: prefs.buildTimeframes === true,
         historyLoading: prefs.historyLoading === 'all' ? 'all' : 'scroll',
+        barCountdown: prefs.barCountdown !== false,
+        highLowLabels: prefs.highLowLabels !== false,
+        pineHigherBars: prefs.pineHigherBars === 'finished' ? 'finished' : 'forming',
+        jobPlace: sanitizeJobSetting(prefs.jobPlace),
         customTimeframes: sanitizeCustomTimeframes(prefs.customTimeframes),
         datasets: Array.isArray(datasets) ? datasets : [],
         ...fields,
@@ -787,6 +862,16 @@ export const useStore = create<AppState>()((set, get) => {
       persistLayout();
     },
 
+    setBarCountdown(v) {
+      set({ barCountdown: v !== false });
+      persistPrefs();
+    },
+
+    setHighLowLabels(v) {
+      set({ highLowLabels: v !== false });
+      persistPrefs();
+    },
+
     setHistoryLoading(v) {
       const was = get().historyLoading;
       const next = v === 'all' ? 'all' : 'scroll';
@@ -799,6 +884,20 @@ export const useStore = create<AppState>()((set, get) => {
         if (activeDatasetId != null || chartRange != null || replay != null) continue;
         void chart.getState().loadData();
       }
+    },
+
+    setPineHigherBars(v) {
+      const was = get().pineHigherBars;
+      const next = v === 'finished' ? 'finished' : 'forming';
+      set({ pineHigherBars: next });
+      persistPrefs();
+      if (was === next) return;
+      for (const chart of Object.values(get().charts)) chart.getState().rerunPine();
+    },
+
+    setJobPlace(v) {
+      set({ jobPlace: sanitizeJobSetting(v) });
+      persistPrefs();
     },
 
     setBuildTimeframes(v) {
@@ -835,6 +934,48 @@ export const useStore = create<AppState>()((set, get) => {
 
     setDockTab(tab) {
       set({ dockTab: tab, dockCollapsed: false });
+    },
+
+    applyBacktestHandoff(h) {
+      const chart = get().charts[get().activeChartId];
+      if (h.providerId && h.symbol && h.timeframe) {
+        // One load: the timeframe is set quietly, then the market opens and loads.
+        chart.getState().setTimeframe(h.timeframe, { load: false, broadcast: false });
+        chart.getState().openWatchItem(h.providerId, h.symbol, { broadcast: false });
+      }
+      chart.getState().setBtConfig({
+        strategyId: h.strategyId,
+        params: { ...DEFAULT_PARAMS[h.strategyId], ...h.params },
+        feeBps: h.feeBps,
+        slippageBps: h.slippageBps,
+        stopLossPct: h.stopLossPct,
+        takeProfitPct: h.takeProfitPct,
+        allowShort: h.allowShort,
+        initialCapital: h.initialCapital,
+        positionSizePct: h.positionSizePct,
+        riskPct: h.riskPct,
+        // A link without the volatility exits clears them.
+        stopMode: h.stopMode,
+        stopAtrMult: h.stopAtrMult,
+        takeProfitMode: h.takeProfitMode,
+        takeProfitAtrMult: h.takeProfitAtrMult,
+        takeProfitR: h.takeProfitR,
+        trailMode: h.trailMode,
+        trailPct: h.trailPct,
+        trailAtrMult: h.trailAtrMult,
+        atrLength: h.atrLength,
+        atrTimeframe: h.atrTimeframe,
+        pineInputs: undefined,
+        // A link without indicator roles clears them.
+        pineRoles: h.pineRoles,
+      });
+      get().setDockTab('backtest');
+      const settings = handoffSettingsText(h);
+      const market = h.providerId && h.symbol && h.timeframe ? ` on ${h.symbol} ${h.timeframe}` : '';
+      get().pushToast(
+        'info',
+        `Backtest set from the strategy maker${market}: ${getStrategy(h.strategyId).name}${settings ? ` (${settings})` : ''}.${h.source ? ` It was found on ${h.source}; run` : ' Run'} it on the same data to see the same trades.`,
+      );
     },
 
     setDockCollapsed(collapsed) {
@@ -919,6 +1060,15 @@ export const useStore = create<AppState>()((set, get) => {
       const valid = style ? sanitizeDefaults({ [tool]: style }, toolSettings)[tool] : undefined;
       if (valid) next[tool] = valid;
       set({ drawingDefaults: next });
+      persistPrefs();
+    },
+
+    setIndicatorDefault(kind, value) {
+      const next = { ...get().indicatorDefaults };
+      delete next[kind];
+      const valid = value ? cleanIndicatorDefault(kind, value) : null;
+      if (valid) next[kind] = valid;
+      set({ indicatorDefaults: next });
       persistPrefs();
     },
 

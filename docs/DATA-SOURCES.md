@@ -48,6 +48,21 @@ Things to know with the setting on:
 
 A probe on live data is in `docs/spikes/built-timeframes/`: Binance 4h, 1w and 1M built from lower bars equal the native ones exactly.
 
+## Update rates
+
+Checked 2026-11-05 against each provider's public docs. This is how often the exchange pushes an update on the live stream Vost uses. Vost adds no throttling, batching or delay between an exchange frame and the browser event: each frame is forwarded as an SSE `kline` event at once. The server sends a `: ping` keepalive to each browser stream every 15 s.
+
+| Provider | Push rate of the stream Vost uses | Source |
+|---|---|---|
+| Binance | `<symbol>@kline_<interval>`: every 2000 ms (1000 ms for `1s`), per the docs | [Kline streams](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams) |
+| Bybit | `kline.<interval>.<symbol>`: push frequency 1-60 s, per the docs (the page does not give a spot-specific rate) | [Kline](https://bybit-exchange.github.io/docs/v5/websocket/public/kline) |
+| OKX | `candle<bar>`: not confirmed; the page could not be read in full on the check date | [Candlesticks channel](https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-candlesticks-channel) |
+| Kraken | v2 `ohlc`: an update on each trade event, no fixed interval, per the docs | [ohlc](https://docs.kraken.com/api/docs/websocket-v2/ohlc) |
+| Coinbase | `matches`: a message per trade (the docs describe it as "a trade occurred between two orders" and say messages can be dropped); Vost builds the candle itself | [Channels](https://docs.cdp.coinbase.com/exchange/websocket-feed/channels) |
+| Hyperliquid | `candle`: not documented | [Subscriptions](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions) |
+
+Yahoo Finance and the Demo provider have no live stream.
+
 ## Summary
 
 | Source | Assets | Key | Live / websocket | Max candles per request | Browser CORS (checked) | Supported today |
@@ -64,6 +79,8 @@ A probe on live data is in `docs/spikes/built-timeframes/`: Binance 4h, 1w and 1
 | Twelve Data | Stocks, FX, crypto, ETFs | Free key | Websocket (paid tiers, verify) | 5000 | Not checked (needs key) | No |
 | Finnhub | Stocks, FX, crypto | Free key | Yes (ws trades) | Varies | Not checked (needs key) | No |
 | Tiingo | Stocks, ETFs, FX, crypto | Free key | Yes (ws, IEX) | Date range | Not checked (needs key) | No |
+
+The crypto rankings behind the market lists come from CoinGecko and CoinMarketCap (see their section); they provide no candles.
 
 Recommended next: Twelve Data and Alpha Vantage as the free-key equity and FX sources. Finnhub and Tiingo are lower priority (see their sections).
 
@@ -248,6 +265,17 @@ Not requested from the container (needs a key); verify before building.
 - Live: websocket for IEX, FX and crypto (restricted on the free plan, verify).
 - Key: free token; `Authorization: Token <key>` header or `token` query parameter.
 - ToS: free plan is for personal use only. [Terms](https://www.tiingo.com/about/terms).
+
+## CoinGecko and CoinMarketCap (market lists)
+
+Not price sources: the server asks them only for the ranking behind the crypto lists of the market search (`GET /api/market-lists`: top 30 by market cap and by 24h volume). Each coin is mapped to its Binance `<SYMBOL>USDT` pair; stablecoins, wrapped, staked and leveraged tokens are left out and coins without a TRADING Binance pair are listed as skipped. The stock and index lists are fixed and dated (copied from `docs/spikes/strategy-search/universe.json`), not fetched.
+
+- CoinGecko: `GET https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc|volume_desc&per_page=100&page=1`. No key. The public API is rate limited (a few tens of calls per minute, unpublished); the server makes two calls per day. Browser CORS not checked (the server calls it).
+- CoinMarketCap: `GET https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest?limit=100&sort=market_cap|volume_24h` with the header `X-CMC_PRO_API_KEY`. Only used when the owner sets `VOST_COINMARKETCAP_API_KEY` (free Basic plan key; a monthly call allowance applies, two calls per day are far below it); tried first, CoinGecko is the fallback. Without the header it answers 401. The key is a secret: never logged, never returned.
+- Cache: each list is kept in memory for 24 hours; a failed refresh serves the last good list marked `stale`, and a failed load is retried on the next request but at most once a minute.
+- Server hosts: `api.coingecko.com`, `pro-api.coinmarketcap.com` (plus Binance's `exchangeInfo` for the mapping).
+- ToS: both free plans are for personal use with attribution rules; see [CoinGecko terms](https://www.coingecko.com/en/api_terms) and [CoinMarketCap terms](https://coinmarketcap.com/terms/). Not re-read for this entry.
+- Checked: the CoinGecko `coins/markets` request above returned 200 with 100 coins on 2026-11-05 (strategy-search spike). The CoinMarketCap request and the free-plan allowances were not called or re-checked (no key available); they follow CoinMarketCap's published API documentation.
 
 ## Link check
 

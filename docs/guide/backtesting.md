@@ -1,6 +1,6 @@
 # Backtesting
 
-Backtests run in your browser (a Web Worker), so they are unlimited. Signals are computed per bar from data up to and including that bar, and executed at the next bar's open. There is no look-ahead.
+Backtests run in your browser (a Web Worker) unless you pick the server (see [Where heavy jobs run](#where-heavy-jobs-run)), so they are unlimited. Signals are computed per bar from data up to and including that bar, and executed at the next bar's open. There is no look-ahead.
 
 ![The Backtest pane](../evidence/bt-range/bt-range-range-desktop.png)
 
@@ -13,32 +13,153 @@ Open the **Backtest** tab in the bottom dock. Pick a **Strategy** and set its pa
 - RSI mean reversion (length, oversold, overbought, direction)
 - Bollinger (length, mult, mode: breakout or reversion, direction)
 - Donchian breakout (entry, exit, direction)
+- Composed (entry + filters): see [Composed strategy](#composed-strategy)
+- Pullback in trend (trend EMA length, RSI length, dip, target, direction)
+- Reversal (length, mult, direction)
+- Momentum breakout (entry, exit, volume average length, volume multiple, direction)
 - Buy & hold
 - Custom (JS) and Pine strategies: see [Custom strategies](../STRATEGIES.md) and [Pine Script](pine.md)
+
+Next to the Strategy select, **Strategy maker** opens the [strategy maker](strategy-maker.md) page in a new tab, where you can find a strategy from trades you mark. Its **Open in Backtest** button brings you back here: Vost opens with this tab already set to the strategy it found, its settings and its risk, and a message says so ([Using a result in the backtester](strategy-maker.md#using-a-result-in-the-backtester)).
 
 A Pine strategy shows all of its inputs under **Script inputs**, with the same controls as the Pine pane (color picker, source and timeframe selects, UTC date-time, text fields), in the script's groups and rows with its tooltips ([Pine Script](pine.md#inputs)). What you pick here is what the backtest runs with, it is kept with the backtest settings, and the optimizer uses it in every combination (and in walk-forward, held-out and Monte Carlo reruns). The optimizer still sweeps only whole-number and decimal inputs, and its CSV export lists the other inputs on its `fixed params:` line.
 
 ![Script inputs in the Pine pane, the same controls as in the Backtest pane](../evidence/pine-pane/pine-pane-inputs-desktop.png)
 
-Risk controls: initial capital, position size (% of equity), fees and slippage in bps per side, stop loss %, take profit % and long and short. Then press **Run backtest**.
+Risk controls: initial capital, position sizing (a percent of equity, or [risk per trade](#risk-per-trade)), fees and slippage in bps per side, [stop loss, take profit and trailing stop](#stops-take-profits-and-trailing-stops) and long and short. Then press **Run backtest**.
 
 While it runs, a progress bar under the button (and in the Results tab) shows the stage and a percent: computing signals, simulating trades, running the Pine script, then computing metrics. It goes away when the run ends.
 
 ![The progress bar mid-run](../evidence/bt-progress/bt-progress-backtest-tab-desktop.png)
 
+## Stops, take profits and trailing stops
+
+Each exit has a mode select beside its value:
+
+- **Stop loss**: **Percent** (the distance from the entry price) or **ATR multiple** (that many times the ATR).
+- **Take profit**: **Percent**, **ATR multiple**, or **Times the stop** (for example 3 gives a 3R target: three times the distance to the stop).
+- **Trailing stop**: **Off**, **Percent** or **ATR multiple**.
+
+The **ATR length** field (default 14, 1 to 500) and the **ATR timeframe** select appear when any exit uses an ATR multiple. The timeframe is "Same as the chart" by default; pick "2x the chart" up to "24x the chart" to measure the ATR on longer bars built from the loaded bars (for example a 4-hour ATR trail on 1-hour entries). Pine strategies set their exits in the script, so these fields are disabled for them.
+
+How each trade gets its levels:
+
+- **Fixed at entry.** Every trade works out its own levels from its entry fill price (slippage included): an ATR stop is entry minus (a long) or plus (a short) the multiple times the ATR, an ATR target the other way round, and a target in times the stop is that many times the initial stop distance.
+- **The ATR is the one on the signal bar**, the bar before the entry fills, so it never includes the entry bar or anything later. With a longer ATR timeframe it is the ATR of the newest longer bar that had closed by the signal bar's close, so a longer bar still forming is never used; the rule is the one for [the Composed strategy's higher timeframe](../STRATEGIES.md#composed-strategy). A multiple that is not a valid timeframe, or bars a week or longer, use the loaded bars. The ATR needs `ATR length` bars of history: until it is known, a trade that needs it does not open. It opens on the first later bar whose signal still asks for that side.
+- **Trailing.** The distance is fixed at entry (a percent of the entry price, or a multiple of the signal-bar ATR). The trail starts that far behind the entry and, after each bar, moves to that distance behind the best price since entry (the highest high for a long, the lowest low for a short). It never moves back. A bar checks the stop set by earlier bars first, so its own high never tightens a stop that the same bar then hits.
+- **The stop in force** is the tightest of the fixed stop, the trail and, for [Composed](#composed-strategy), a TradingView indicator stop. If one bar reaches both the stop and the target, the stop wins. A gap through the level fills at the open. After a stop or a target, the signal has to leave that side before the next entry.
+- **Exit reasons.** An exit at the trail is a **trailing stop** in the trades list and the exit reasons table; an exit at the fixed stop is a stop loss.
+- **A TradingView indicator as the stop or the target.** A Composed strategy can use an indicator's line plot as its stop (fixed at entry, or trailing with the plot) or as its take profit; see [Composed strategy](#composed-strategy). The level in force on a bar is the plot's value on the bar before, so nothing reads a later bar. A stop with no usable level at entry (no value, or on the wrong side of the price) opens no trade, like an ATR stop during its warm-up. On later bars, or for a target, no usable level just means that stop or target is not in force on that bar. Exits at the plot are a stop loss or a take profit in the trades list.
+- **Times the stop needs a stop.** A take profit in times the stop with no stop loss, no trailing stop and no indicator stop is refused with a message, and nothing starts (the optimizer too).
+
+[Risk per trade](#risk-per-trade) sizes each trade from its own initial stop distance, the tighter of the fixed stop and the trail's starting level, so an ATR stop or a trailing stop alone is enough.
+
+![An ATR stop, a take profit of 3 times the stop and a 1.5 ATR trailing stop set](../evidence/bt-results/bt-results-exits-setting-desktop.png)
+
+The Results tab names the modes in its badges (for example `SL 2 ATR`, `TP 3R`, `Trail 1.5 ATR`, and `ATR 14`, or `ATR 14 on 4x` with a longer ATR timeframe), and the optimizer's CSV names them in its settings lines.
+
+![The Results badges for the exit modes](../evidence/bt-results/bt-results-exits-badges-desktop.png)
+
+![A trailing stop row in the exit reasons table](../evidence/bt-results/bt-results-exits-trades-desktop.png)
+
+## Composed strategy
+
+**Composed** takes its entries from one rule (SMA or EMA crossover, MACD, RSI, Bollinger or Donchian) and lets up to four filters veto them: trend (price above or below an SMA or EMA), volume (at least a multiple of its recent average), volatility (ATR as a percent of price inside a band) and trend strength (ADX at least a level). Choose the **Entry rule**, then switch filters on; only the chosen rule's settings and the enabled filters' settings show. A blocked entry is skipped for the rest of that signal run, and exits are the entry rule's own. With every filter off it equals the entry rule alone. The trend and volatility filters can also read a longer timeframe built from your bars (for example a 4-hour trend on 1-hour entries), using only longer bars that have already closed. Rules in [Composed strategy](../STRATEGIES.md#composed-strategy).
+
+![Composed with an EMA entry and the trend and volume filters on](../evidence/bt-results/bt-results-composed-settings-desktop.png)
+
+A stored **TradingView indicator** (added in the Pine pane) can also be the entry rule or a filter. Set **Entry rule** to "TradingView indicator", pick the indicator, a plot and a rule (for example the close crossing the Supertrend line, long while it is above and short while it is below), or use **Add TradingView indicator filter** to let an indicator veto entries (for example Supertrend above a level, labelled Trend). The script's own inputs show under each indicator. A bar where a plot has no value yet counts as warming up. Results counts the blocks as `Supertrend (trend) blocked N`, and a run fails with a message naming the indicator when it was removed or its plot is gone. It works the same in the browser, on the server and in the optimizer. Rules in [TradingView indicator roles](../STRATEGIES.md#composed-strategy).
+
+![The Composed settings with a TradingView indicator as the entry and as a filter](../evidence/bt-pine-role/bt-pine-role-picker-desktop.png)
+
+![The Results line counting the indicator filter's blocked entries](../evidence/bt-pine-role/bt-pine-role-results-desktop.png)
+
+A stored indicator can also be the Composed strategy's **stop** or **take profit**: **Add TradingView indicator stop** and **Add TradingView indicator target** (one of each, each button off once it is used) give a card with the indicator, a line plot and, for the stop, **Fixed at entry** or **Trailing with the plot** (for example a Supertrend line). The stop sits at the plot's value on the bar before the one being simulated: a fixed stop keeps the value of the signal bar, a trailing one follows the plot bar by bar (it can loosen as well as tighten). A long stop must be below the price and a short stop above it; a target must be on the profit side. The stop in force is the tightest of the fixed stop, the trailing stop and the indicator stop, and the target is the nearer of the fixed target and the indicator target. The indicator stop also sizes [risk per trade](#risk-per-trade) and a take profit in times the stop, so it can be the only stop. The Results badges read `SL <indicator> <plot>` or `Trail <indicator> <plot>`, and `TP <indicator> <plot>`.
+
+![The Composed settings with an indicator trailing stop and target](../evidence/bt-pine-role/bt-pine-role-stop-picker-desktop.png)
+
+![The Results badges for the indicator stop and target](../evidence/bt-pine-role/bt-pine-role-stop-results-desktop.png)
+
+![Exits at the indicator stop shown as stop loss in the exit reasons](../evidence/bt-pine-role/bt-pine-role-stop-trades-desktop.png)
+
+## Risk per trade
+
+**Position sizing** has two choices. **Percent of equity** is the default: each trade commits that share of your equity. **Risk per trade (%)** sizes each trade so that hitting its stop loss loses that percent of your equity at that moment:
+
+position = equity x risk % / stop %
+
+The stop is the trade's own initial stop distance as a percent of its entry price: the fixed percent, or the ATR multiple worked out at entry.
+
+From $1,000 at 2% risk, a stopped-out trade loses $20.00 and the next one $19.60, whatever the stop distance. A 2% stop is a position the size of the account; a 0.04% stop is a position 50 times the account.
+
+- **There is no cap on the position.** A tight stop can mean a leverage of 50x or more. Each trade records the leverage it used, and the Results tab shows the largest one as the **Max leverage** card, so check that your exchange would allow it.
+- **It needs a stop**: a percent or ATR stop loss, or a trailing stop. With none, the run is refused with "Risk per trade needs a stop loss" and nothing starts (the optimizer too).
+- The loss can be larger than the risk percent: fees count on top of it, and a gap through the stop fills at the open, past the stop. On a leveraged position a big gap can wipe the account out; the run still finishes and opens no new trade once the equity is gone.
+- It is saved with the backtest settings, comes across from the strategy maker, and is named in its settings text and Pine export (each entry is sized by `qty=`). Pine strategies size in their own script, so the setting does not apply to them.
+
+![The Position sizing select set to Risk per trade, 2 percent with a 0.5 percent stop](../evidence/bt-results/bt-results-risk-setting-desktop.png)
+
+![The Max leverage card in Results after a risk-sized run](../evidence/bt-results/bt-results-risk-results-desktop.png)
+
+![The refusal when risk per trade has no stop loss](../evidence/bt-results/bt-results-risk-refused-desktop.png)
+
 ## The backtest range
 
-The pane has a **From** and **To** range. The backtester and the optimizer run only on that window of the loaded data; empty means all of it. The pane says how many of the loaded bars are in the range, and warns when the range starts before or ends after the data or holds fewer than 3 bars. The range is remembered between sessions.
+The pane has a **From** and **To** range. The backtester and the optimizer run only on that window of the loaded data; empty means all of it (**Full data**). The pane says how many of the loaded bars are in the range, and warns when the range starts before or ends after the data or holds fewer than 3 bars. The range is remembered between sessions.
+
+**Full data** (no From) tests the provider's whole history for that market and timeframe: running first loads all the older history (the pane says "the full history loads on run" beforehand), up to a limit of 200,000 bars, and the finished message names the limit if it stopped there. This works in both chart history modes and leaves the chart view alone. A local dataset, a chart range and bar replay never load more: Full data there is the data shown.
 
 When the range starts before the bars the chart has loaded (the chart opens on the latest page of history), running loads the older history first (the progress bar says "Loading history"), tests the whole range and moves the chart to show it. A range inside the loaded bars runs at once and leaves the chart alone. If the data source has no bars that far back, or the load fails, the run says so or uses what exists.
 
 ![A backtest range](../evidence/bt-range/bt-range-range-desktop.png)
 
+## Where heavy jobs run
+
+By default a backtest, an optimizer run and a Monte Carlo run run in your browser tab and stop when the tab closes. The same choice sends the strategy maker's Find, Retrain and market search to the server (see [Where Find and the market search run](strategy-maker.md#where-find-and-the-market-search-run)). In **Settings**, **Heavy jobs** lets you pick **Server** instead (see [The Settings popup](getting-started.md#the-settings-popup)). A choice applies to the next job; a job already running is not moved.
+
+On **Server**, a run of a built-in strategy goes to the Vost server and shows the same progress bar and the same results as in the browser. Pine and custom-code strategies follow the same switch, so their code then runs on the server machine (see [Running user code on the server](../DEPLOYMENT.md#running-user-code-on-the-server) before you turn that on for a Vost others can reach); only chart indicators always run in the browser. The finish message says where the run happened ("Backtest finished on the server in 1,898 ms ...").
+
+![A backtest finished on the server](../evidence/server-jobs/server-jobs-backtest-desktop.png)
+
+### The benchmark and Auto
+
+Which place is faster depends on your machine and on the server's. **Run benchmark** in **Settings**, **Heavy jobs**, runs five standard jobs one at a time, each first in the browser and then on the server: a backtest, an optimizer run, a Monte Carlo run, a Find and a market search, all on the same built-in demo data so two runs compare. The line under the button names the job running ("Benchmark: Optimizer on the server, 3 of 10") and **Cancel** stops the run and saves nothing. Each time is the whole job: for the server it includes sending the job, waiting in the queue, the run and fetching the result.
+
+![The benchmark running](../evidence/benchmark/benchmark-running-desktop.png)
+
+The result is a table with one row per job and its time in the browser, on the server and which was **Faster**, under the date of the run. It is saved on the Vost server and stays until you run the benchmark again. If the server cannot take a job, its cell says **Unavailable** (hover for the reason) and the browser time is kept.
+
+![The benchmark result](../evidence/benchmark/benchmark-results-desktop.png)
+
+Pick **Auto** and each job goes to the place that was faster for its kind in the benchmark (Retrain uses the Find time); equal times go to the browser. A finish message that names the place adds "(Auto)" ("Backtest finished on the server (Auto) in 1,898 ms ..."). With no benchmark, or for a kind it could not time on both sides, Auto runs the job in the browser and the finish message says so ("(Auto: run the benchmark to let Auto choose)"). If Auto picks the server and the server cannot take the job, it runs in the browser with the usual notice. Pine and custom-code strategies follow Auto the same way; only chart indicators always run in the browser.
+
+![A backtest finished on the server when Auto chose it](../evidence/benchmark/benchmark-finished-server-desktop.png)
+
+A server run keeps going when you close the tab or reload. Open the chart again and it shows the progress of a run still going, or the finished result; a run that ended while Vost was closed adds a note to the inbox under Backtest ("... finished on the server while Vost was closed"). A Monte Carlo run is picked up again only while the backtest it ran on is the one shown. **Cancel** on a server optimizer run stops it on the server and brings back the previous result. If the server restarts during a run, the run is gone and a message says so.
+
+![An optimizer run going on the server](../evidence/server-jobs/server-jobs-running-desktop.png)
+
+![The same run after reloading the page, with its progress back](../evidence/server-jobs/server-jobs-reloaded-desktop.png)
+
+![The finished result after the reload](../evidence/server-jobs/server-jobs-result-desktop.png)
+
+If the server cannot take a job (its engine is missing, its data folder cannot be written, the request is too big or the server cannot be reached), the job runs in the browser instead and one message says why ("Server jobs unavailable (...); running in the browser"), in a toast and in the inbox under Backtest. With **Browser** picked, nothing is sent to the server.
+
 ## Results
 
 The **Results** tab shows 20+ metrics (return against Buy & hold, CAGR, Sharpe, Sortino, Calmar, max drawdown and its duration, profit factor, exposure, expectancy and more; hover, focus or tap any figure for what it means, how to read it and what it relates to), the equity and underwater chart and the full trade log. **Export trades CSV** and **Export equity CSV** save them. The equity chart draws a dashed grey **Buy & hold** line next to the strategy's equity, starting from the same capital, with a legend naming both lines and their final values. Buy & hold ignores fees and slippage. **Export equity CSV** has a `buy_hold` column with the same curve.
 
+The **Max DD duration** card shows the longest drawdown in bars and, under it, the same stretch in time units: minutes, hours, days, weeks and years, only the units that fit (at least one, and none finer than the data's bar size). It is real clock time between the bars, so a stock's weekends and nights count; on 24/7 crypto data it equals bars times the timeframe.
+
+The **Entry signals** and **Signal rate** cards say how often the strategy asked for a trade. A signal fires each time the strategy turns to a new side, long or short; a repeat of the side it already holds does not count. **Entry signals** shows how many fired and, under it, how many were taken as trades. The two differ when a stop-out blocks re-entry until the signal flips, or the account is empty. **Signal rate** shows signals per 100 bars and per day. Both read n/a for Pine strategies, whose trades come from the script. The optimizer CSV has the same columns.
+
+![The metric grid with the Max DD duration, Entry signals and Signal rate cards](../evidence/bt-results/bt-results-metric-grid-desktop.png)
+
 ![The equity chart with the Buy & hold line](../evidence/bt-results/bt-results-equity-desktop.png)
+
+When the strategy is Composed, a line under the metric grid counts the entry signals and how many each enabled filter blocked, for example `Filters: 3689 entry signals, 1033 taken - trend blocked 1620, volume blocked 1863`. A signal vetoed by two filters counts for both.
+
+![The filter line in Results](../evidence/bt-results/bt-results-composed-filters-desktop.png)
 
 Every figure in the tab has this help, including the breakdown rows, streaks, exit reasons, the chart legend and the Monte Carlo figures. Press Escape to close it.
 
@@ -67,7 +188,7 @@ The table lists the 5th, 25th, median, 75th and 95th percentile of final return 
 
 The **Optimizer** tab grid-searches any number of parameters at once. Each parameter is a row (**Parameter 1**, **Parameter 2**, ...) with its own **From**, **To** and **Step**. Press **Add parameter** to sweep another one (it starts at half to one and a half times its current value) and **Remove** to drop a row; a parameter can only be used in one row. The pane shows how many combinations it will run (the product of every row). Choose the metric in **Rank by** and press **Optimize**. Every combination is listed in a full-width table with its rank, one column per swept parameter, the ranking metric and the main measures (total return, CAGR, Sharpe, Sortino, Calmar, profit factor, win rate, max drawdown and its duration, trades, exposure, expectancy and buy & hold). Click a column header to sort by it (click again to reverse; empty values always come last); sorting by **Rank** brings back the ranking order. The table shows 100 rows at a time: use **Previous** and **Next**, and the count under it ("Rows 101-200 of 1,234") says where you are. A heatmap below the table shows the combinations. Click a heatmap cell or press **Apply** on a row to set those parameters and re-run the backtest.
 
-**Export results CSV** downloads every combination in ranking order, with all measures as raw numbers. The file starts with `#` lines recording the settings the run used (strategy, fixed parameters, symbol, timeframe, data and range, capital, position size, fees, slippage, stop loss, take profit, shorts, ranking metric and the swept ranges), so a result can be reproduced later; changing settings after the run does not change them.
+**Export results CSV** downloads every combination in ranking order, with all measures as raw numbers. The file starts with `#` lines recording the settings the run used (strategy, fixed parameters, symbol, timeframe, data and range, capital, position size (or the risk per trade % when you size by risk), fees, slippage, stop loss, take profit, shorts, ranking metric and the swept ranges), so a result can be reproduced later; changing settings after the run does not change them.
 
 The heatmap has **Rows** and **Columns** pickers for choosing its two axes among the swept parameters (**Columns** can be set to none). With three or more parameters it shows only the combinations where the other parameters equal the best result, and says which values they are fixed at.
 

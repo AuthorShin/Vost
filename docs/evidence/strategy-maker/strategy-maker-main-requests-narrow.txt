@@ -1,0 +1,10 @@
+http://127.0.0.1:45265/
+http://127.0.0.1:45265/assets/index-B1VarB40.js
+http://127.0.0.1:45265/assets/index-BYvYYXCq.css
+http://127.0.0.1:45265/api/settings
+http://127.0.0.1:45265/api/status
+http://127.0.0.1:45265/api/settings/savedLayouts.v1
+http://127.0.0.1:45265/api/alerts/events
+http://127.0.0.1:45265/api/images
+http://127.0.0.1:45265/api/images
+http://127.0.0.1:45265/api/alerts

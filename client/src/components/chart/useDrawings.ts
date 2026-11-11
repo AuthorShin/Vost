@@ -2,6 +2,7 @@ import type { IChartApi, ISeriesApi } from 'lightweight-charts';
 import { flushSync } from 'react-dom';
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
 import { MOUSE_HIT, TOUCH_HIT, WEAK_MAGNET_PX, snapToBar, type Pt } from '../../lib/drawingGeometry';
+import { flushStorage } from '../../lib/storage';
 import {
   add,
   commit,
@@ -11,7 +12,6 @@ import {
   saveDrawings,
   newDrawingId,
   previewMany,
-  redo,
   remove,
   removeAll,
   removeMany,
@@ -23,7 +23,6 @@ import {
   sourceKey,
   stateImageKeys,
   persistedImageKeys,
-  undo,
   anchorRange,
   type Anchor,
   type Drawing,
@@ -40,7 +39,7 @@ import { NotePopups } from './notePopups';
 import { editorStyle, type EditorTarget } from './textPlacement';
 import { usePublishDrawings } from './activeDrawings';
 import { cellRect, cellUnder } from './tableEditing';
-import { available, createSweeper, registerImageRefs } from '../../lib/drawingImages';
+import { available, createSweeper, migrateBrowserImages, registerImageRefs } from '../../lib/drawingImages';
 import { dragCorner, fitToHalfPane, naturalEnd } from '../../lib/geometry/image';
 import { subscribeBitmaps } from './imageCache';
 import { IMAGE_TOOL, adoptFile, dragHasFiles, droppedFile, getPending, openChooser, pictureFrom, setPending } from './imagePlacement';
@@ -553,11 +552,15 @@ export function useDrawings(
     sync();
   }, [key, sync, getState]);
 
-  /* Pictures: whether the store opens, the references this tab holds, a repaint when a picture is decoded, a first sweep. */
+  /* Pictures: move the ones this browser still holds to the server, then whether the server can store them, the references this tab holds, a repaint when a picture is decoded, a first sweep. */
   useEffect(() => {
     let on = true;
-    void available().then((ok) => on && setImagesAvailable(ok));
-    imageSweeper().schedule();
+    void migrateBrowserImages()
+      .then(() => available())
+      .then((ok) => {
+        if (on) setImagesAvailable(ok);
+        imageSweeper().schedule();
+      });
     const unregister = registerImageRefs(() => [...statesRef.current.values()].flatMap(stateImageKeys));
     const unsubscribe = subscribeBitmaps(sync);
     return () => {
@@ -589,7 +592,10 @@ export function useDrawings(
 
   /* Flush a pending save when the page goes away. */
   useEffect(() => {
-    const flush = () => drawingsStorage().flush();
+    const flush = () => {
+      drawingsStorage().flush();
+      flushStorage();
+    };
     window.addEventListener('pagehide', flush);
     return () => {
       window.removeEventListener('pagehide', flush);
@@ -1240,12 +1246,9 @@ export function useDrawings(
         return;
       }
       if (action === 'undo' || action === 'redo') {
-        const st = getState();
-        const next = action === 'redo' ? redo(st) : undo(st);
         e.preventDefault();
-        if (next === st) return;
-        selectedRef.current = prune(selectedRef.current, next.drawings);
-        setState(next, true);
+        if (action === 'redo') actionsRef.current.redo();
+        else actionsRef.current.undo();
         return;
       }
       if (action === 'copy') {
